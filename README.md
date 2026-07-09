@@ -4,9 +4,9 @@
 
 ```
 ┌─────────────┐      ┌─────────────┐      ┌─────────────┐      ┌──────────────┐
-│ Application │─────▶│   Client    │─────▶│   Server    │─────▶│  Internet    │
-│  (Browser)  │ TCP  │ SOCKS5:1080 │ SMTP │  Port 587   │ TCP  │              │
-│             │◀─────│             │◀─────│             │◀─────│              │
+│ Application │─────▶│   Client    │─────▶│   Server    │─────▶│  Destination │
+│  (Browser)  │ TCP  │  Forward:   │ SMTP │  Port 587   │ TCP  │  port:2090   │
+│             │◀─────│  port:2090  │◀─────│             │◀─────│              │
 └─────────────┘      └─────────────┘      └─────────────┘      └──────────────┘
                             │                    │
                             │   Looks like       │
@@ -30,7 +30,7 @@
 | ⚡ **High Speed** | Binary streaming protocol after handshake - minimal overhead |
 | 👥 **Multi-User** | Per-user secrets, IP whitelists, and logging settings |
 | 🔑 **Authentication** | Per-user pre-shared keys with HMAC-SHA256 |
-| 🌐 **SOCKS5 Proxy** | Standard proxy interface - works with any application |
+| 🌐 **Port Forwarding** | Forward any local port through the tunnel to any destination |
 | 📡 **Multiplexing** | Multiple connections over single tunnel |
 | 🛡️ **IP Whitelist** | Per-user access control by IP address/CIDR |
 | 📦 **Easy Install** | One-liner server installation with systemd service |
@@ -112,15 +112,13 @@ The launcher will automatically install dependencies and start the client.
 
 ✅ You should see:
 ```
-SMTP Tunnel Proxy Client
+SMTP Tunnel Client - Port Forwarding Mode
 User: alice
 
 [INFO] Starting SMTP Tunnel...
-[INFO] SOCKS5 proxy will be available at 127.0.0.1:1080
-
 Connecting to myserver.duckdns.org:587
 Connected - binary mode active
-SOCKS5 proxy on 127.0.0.1:1080
+Listening on 127.0.0.1:2090 -> 127.0.0.1:2090
 ```
 
 ### Option B: Manual Way
@@ -142,7 +140,9 @@ cat > config.yaml << EOF
 client:
   server_host: "myserver.duckdns.org"
   server_port: 587
-  socks_port: 1080
+  listen_port: 2090
+  forward_host: "127.0.0.1"
+  forward_port: 2090
   username: "alice"
   secret: "your-secret-from-admin"
   ca_cert: "ca.crt"
@@ -156,50 +156,27 @@ python client.py -c config.yaml
 
 ## 📖 Usage
 
-### 🌐 Configure Your Applications
+### 🔀 Port Forwarding
 
-Set SOCKS5 proxy to: `127.0.0.1:1080`
-
-#### 🦊 Firefox
-1. Settings → Network Settings → Settings
-2. Manual proxy configuration
-3. SOCKS Host: `127.0.0.1`, Port: `1080`
-4. Select SOCKS v5
-5. ✅ Check "Proxy DNS when using SOCKS v5"
-
-#### 🌐 Chrome
-1. Install "Proxy SwitchyOmega" extension
-2. Create profile with SOCKS5: `127.0.0.1:1080`
-
-#### 🪟 Windows (System-wide)
-Settings → Network & Internet → Proxy → Manual setup → `socks=127.0.0.1:1080`
-
-#### 🍎 macOS (System-wide)
-System Preferences → Network → Advanced → Proxies → SOCKS Proxy → `127.0.0.1:1080`
-
-#### 🐧 Linux (System-wide)
-```bash
-export ALL_PROXY=socks5://127.0.0.1:1080
-```
-
-#### 💻 Command Line
+The client forwards a local port through the SMTP tunnel to a destination reachable from the server.
 
 ```bash
-# curl
-curl -x socks5h://127.0.0.1:1080 https://ifconfig.me
+# Forward local port 2090 to a service on the server's localhost
+python client.py --listen-port 2090 --forward-host 127.0.0.1 --forward-port 2090
 
-# git
-git config --global http.proxy socks5://127.0.0.1:1080
+# Forward local port 8080 to an internal web server
+python client.py --listen-port 8080 --forward-host 10.0.0.5 --forward-port 80
 
-# Environment variable
-export ALL_PROXY=socks5://127.0.0.1:1080
+# Forward local port 3306 to a database behind the server
+python client.py --listen-port 3306 --forward-host db.internal --forward-port 3306
 ```
 
 ### ✅ Test Connection
 
 ```bash
-# Should show your VPS IP
-curl -x socks5://127.0.0.1:1080 https://ifconfig.me
+# Connect to a service forwarded through the tunnel
+curl http://127.0.0.1:8080
+telnet 127.0.0.1 2090
 ```
 
 ---
@@ -250,8 +227,10 @@ users:
 |--------|-------------|---------|
 | `server_host` | Server domain name | Required |
 | `server_port` | Server port | `587` |
-| `socks_port` | Local SOCKS5 port | `1080` |
-| `socks_host` | Local SOCKS5 interface | `127.0.0.1` |
+| `listen_port` | Local port to listen on | `1080` |
+| `listen_host` | Local interface to bind to | `127.0.0.1` |
+| `forward_host` | Destination host (reachable from server) | Required |
+| `forward_port` | Destination port | Required |
 | `username` | Your username | Required |
 | `secret` | Your authentication secret | Required |
 | `ca_cert` | CA certificate for verification | Recommended |
@@ -289,16 +268,21 @@ python server.py [-c CONFIG] [-d]
 ### 💻 Client
 ```bash
 python client.py [-c CONFIG] [--server HOST] [--server-port PORT]
-                 [-p SOCKS_PORT] [-u USERNAME] [-s SECRET] [--ca-cert FILE] [-d]
+                 [-p LISTEN_PORT] [--listen-host HOST]
+                 [--forward-host HOST] [--forward-port PORT]
+                 [-u USERNAME] [-s SECRET] [--ca-cert FILE] [-d]
 
-  -c, --config      Config file (default: config.yaml)
-  --server          Override server domain
-  --server-port     Override server port
-  -p, --socks-port  Override local SOCKS port
-  -u, --username    Your username
-  -s, --secret      Override secret
-  --ca-cert         CA certificate path
-  -d, --debug       Enable debug logging
+  -c, --config        Config file (default: config.yaml)
+  --server            Override server domain
+  --server-port       Override server port
+  -p, --listen-port   Local port to listen on
+  --listen-host       Local interface to bind to
+  --forward-host      Forward destination host
+  --forward-port      Forward destination port
+  -u, --username      Your username
+  -s, --secret        Override secret
+  --ca-cert           CA certificate path
+  -d, --debug         Enable debug logging
 ```
 
 ### 👥 User Management
