@@ -16,7 +16,7 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # GitHub raw URL base
-GITHUB_RAW="https://raw.githubusercontent.com/x011/smtp-tunnel-proxy/main"
+GITHUB_RAW="https://raw.githubusercontent.com/forghani77/smtp-tunnel-proxy/main"
 
 # Installation directories
 INSTALL_DIR="/opt/smtp-tunnel"
@@ -162,14 +162,12 @@ install_files() {
         print_info "  Linked: $script -> $BIN_DIR/$script"
     done
 
-    # Download extra files
+    # Download extra files (non-fatal - some may not exist on older branches)
     for file in $EXTRA_FILES; do
-        if ! download_file "$file" "$INSTALL_DIR/$file"; then
-            print_error "Failed to download: $file"
-            exit 1
+        if download_file "$file" "$INSTALL_DIR/$file"; then
+            chmod +x "$INSTALL_DIR/$file"
+            print_info "  Installed: $file"
         fi
-        chmod +x "$INSTALL_DIR/$file"
-        print_info "  Installed: $file"
     done
 
     # Download config template
@@ -224,8 +222,37 @@ EOF
 
 # Create uninstall script
 create_uninstall_script() {
-    chmod +x "$INSTALL_DIR/uninstall.sh"
-    print_info "Created: $INSTALL_DIR/uninstall.sh"
+    if [ -f "$INSTALL_DIR/uninstall.sh" ]; then
+        chmod +x "$INSTALL_DIR/uninstall.sh"
+        print_info "Created: $INSTALL_DIR/uninstall.sh"
+    else
+        cat > "$INSTALL_DIR/uninstall.sh" << 'EOF'
+#!/bin/bash
+# SMTP Tunnel Proxy - Uninstall Script
+
+echo "Stopping service..."
+systemctl stop smtp-tunnel 2>/dev/null || true
+systemctl disable smtp-tunnel 2>/dev/null || true
+
+echo "Removing files..."
+rm -f /etc/systemd/system/smtp-tunnel.service
+rm -f /usr/local/bin/smtp-tunnel-adduser
+rm -f /usr/local/bin/smtp-tunnel-deluser
+rm -f /usr/local/bin/smtp-tunnel-listusers
+rm -f /usr/local/bin/smtp-tunnel-update
+rm -rf /opt/smtp-tunnel
+
+systemctl daemon-reload
+
+echo ""
+echo "Note: Configuration in /etc/smtp-tunnel was NOT removed"
+echo "Remove manually if needed: rm -rf /etc/smtp-tunnel"
+echo ""
+echo "SMTP Tunnel Proxy uninstalled successfully"
+EOF
+        chmod +x "$INSTALL_DIR/uninstall.sh"
+        print_info "Created: $INSTALL_DIR/uninstall.sh (fallback)"
+    fi
 }
 
 # Interactive setup
