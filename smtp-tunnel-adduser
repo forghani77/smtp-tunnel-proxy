@@ -122,12 +122,13 @@ def create_client_package(
 
 ## Files
 
-- start.bat      - Windows launcher (double-click to run)
-- start.sh       - Linux/Mac launcher (run with ./start.sh)
-- client.py      - The tunnel client
-- common.py      - Shared library
-- config.yaml    - Your configuration (pre-configured)
-- ca.crt         - Server certificate for verification
+- install.sh    - Install as systemd service (Linux, run with sudo)
+- start.bat     - Windows launcher (double-click to run)
+- start.sh      - Linux/Mac launcher (run with ./start.sh)
+- client.py     - The tunnel client
+- common.py     - Shared library
+- config.yaml   - Your configuration (pre-configured)
+- ca.crt        - Server certificate for verification
 - requirements.txt - Python dependencies
 
 ## What it does
@@ -141,8 +142,9 @@ If forwarding to a web server, open http://127.0.0.1:LISTEN_PORT in your browser
 
 ## Easy Start
 
-Windows: Double-click start.bat
+Windows:   Double-click start.bat
 Linux/Mac: Run ./start.sh
+Linux:     sudo bash install.sh  (installs as a systemd service)
 """
         readme_path = os.path.join(pkg_dir, 'README.txt')
         with open(readme_path, 'w') as f:
@@ -308,6 +310,60 @@ echo -e "${{YELLOW}}Connection closed.${{NC}}"
             f.write(sh_content)
         os.chmod(sh_path, 0o755)
 
+        # Create Linux install script (systemd service)
+        install_content = f'''#!/bin/bash
+#
+# SMTP Tunnel Client - Install as systemd service
+# User: {username}
+#
+
+INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Install dependencies
+echo "[INFO] Installing dependencies..."
+pip3 install --break-system-packages -r "$INSTALL_DIR/requirements.txt" 2>/dev/null || \\
+pip3 install -r "$INSTALL_DIR/requirements.txt" 2>/dev/null || \\
+echo "[WARN] pip install failed, continuing anyway"
+
+# Create systemd service file
+SERVICE_NAME="smtp-tunnel-client-{username}"
+SERVICE_FILE="/etc/systemd/system/${{SERVICE_NAME}}.service"
+
+cat > "$SERVICE_FILE" << EOF
+[Unit]
+Description=SMTP Tunnel Client - {username}
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$INSTALL_DIR
+ExecStart=/usr/bin/python3 $INSTALL_DIR/client.py -c $INSTALL_DIR/config.yaml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo "[INFO] Created $SERVICE_FILE"
+
+# Enable and start
+systemctl daemon-reload
+systemctl enable "$SERVICE_NAME"
+systemctl start "$SERVICE_NAME"
+
+echo "[INFO] Service $SERVICE_NAME installed and started."
+echo "[INFO] Check status: systemctl status $SERVICE_NAME"
+echo "[INFO] View logs: journalctl -u $SERVICE_NAME -f"
+'''
+        install_sh_path = os.path.join(pkg_dir, 'install.sh')
+        with open(install_sh_path, 'w') as f:
+            f.write(install_content)
+        os.chmod(install_sh_path, 0o755)
+
         # Create ZIP file
         zip_filename = f"{username}.zip"
         zip_path = os.path.abspath(os.path.join(output_dir, zip_filename))
@@ -421,8 +477,10 @@ Examples:
         print()
         print("Send this ZIP file to the user. They just need to:")
         print("  1. Extract the ZIP")
-        print("  2. pip install --break-system-packages -r requirements.txt")
-        print("  3. python client.py")
+        print("  2. sudo bash install.sh  (Linux) or double-click start.bat (Windows)")
+        print("")
+        print("  Manual: pip install --break-system-packages -r requirements.txt")
+        print("          python client.py")
 
     return 0
 
