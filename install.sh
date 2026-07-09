@@ -355,19 +355,25 @@ EOF
             read -p "    Forward host: " FWD_HOST < /dev/tty
             FWD_HOST="${FWD_HOST:-127.0.0.1}"
 
+            print_ask "Local listen address (default: 127.0.0.1):"
+            echo -e "    ${YELLOW}Use 0.0.0.0 to allow connections from other machines${NC}"
+            read -p "    Listen host: " LISTEN_HOST < /dev/tty
+            LISTEN_HOST="${LISTEN_HOST:-127.0.0.1}"
+
             echo ""
             print_step "Creating user '$FIRST_USER'..."
 
             cd "$INSTALL_DIR"
             if python3 smtp-tunnel-adduser "$FIRST_USER" \
-                --forward-host "$FWD_HOST" --forward-port "$FWD_PORT"; then
+                --forward-host "$FWD_HOST" --forward-port "$FWD_PORT" \
+                --listen-host "$LISTEN_HOST"; then
                 echo ""
                 print_info "User '$FIRST_USER' created successfully!"
                 print_info "Client package: $INSTALL_DIR/${FIRST_USER}.zip"
                 echo ""
                 echo -e "    ${YELLOW}Send this ZIP file to the user - it contains everything needed to connect!${NC}"
                 echo ""
-                echo -e "    The client will forward ${YELLOW}127.0.0.1:${FWD_PORT}${NC} -> tunnel -> ${YELLOW}${FWD_HOST}:${FWD_PORT}${NC}"
+                echo -e "    The client will forward ${YELLOW}${LISTEN_HOST}:${FWD_PORT}${NC} -> tunnel -> ${YELLOW}${FWD_HOST}:${FWD_PORT}${NC}"
             else
                 print_warn "Failed to create user. You can create users later with:"
                 echo "    smtp-tunnel-adduser <username>"
