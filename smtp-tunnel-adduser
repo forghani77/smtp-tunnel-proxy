@@ -16,7 +16,7 @@ import tempfile
 import shutil
 
 # Add current directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 from common import load_users, save_users, load_config, UserConfig
 
@@ -26,8 +26,13 @@ def generate_secret() -> str:
     return secrets.token_urlsafe(32)
 
 
-def create_client_config(server_host: str, server_port: int, username: str, secret: str) -> str:
+def create_client_config(
+    server_host: str, server_port: int, username: str, secret: str,
+    forward_host: str = '', forward_port: int = 0
+) -> str:
     """Generate client config.yaml content."""
+    fwd_host = forward_host if forward_host else '127.0.0.1'
+    fwd_port = forward_port if forward_port else 2090
     return f"""# SMTP Tunnel Client Configuration
 # Generated for user: {username}
 
@@ -40,9 +45,11 @@ client:
   username: "{username}"
   secret: "{secret}"
 
-  # Local SOCKS5 proxy
-  socks_port: 1080
-  socks_host: "127.0.0.1"
+  # Port forwarding
+  listen_host: "127.0.0.1"
+  listen_port: {fwd_port}
+  forward_host: "{fwd_host}"
+  forward_port: {fwd_port}
 
   # CA certificate for server verification
   ca_cert: "ca.crt"
@@ -55,7 +62,9 @@ def create_client_package(
     server_host: str,
     server_port: int,
     base_dir: str,
-    output_dir: str
+    output_dir: str,
+    forward_host: str = '',
+    forward_port: int = 0
 ) -> str:
     """
     Create a ZIP package with everything the client needs.
@@ -90,7 +99,9 @@ def create_client_package(
             print("Warning: ca.crt not found - client will not be able to verify server")
 
         # Generate client config
-        config_content = create_client_config(server_host, server_port, username, secret)
+        config_content = create_client_config(
+            server_host, server_port, username, secret, forward_host, forward_port
+        )
         config_path = os.path.join(pkg_dir, 'config.yaml')
         with open(config_path, 'w') as f:
             f.write(config_content)
@@ -106,10 +117,6 @@ def create_client_package(
 2. Run the client:
    python client.py
 
-3. Configure your browser/apps to use SOCKS5 proxy:
-   Host: 127.0.0.1
-   Port: 1080
-
 ## Files
 
 - start.bat      - Windows launcher (double-click to run)
@@ -120,9 +127,14 @@ def create_client_package(
 - ca.crt         - Server certificate for verification
 - requirements.txt - Python dependencies
 
+## What it does
+
+The client listens on a local port and forwards all connections
+through the SMTP tunnel to the destination configured in config.yaml.
+
 ## Test Connection
 
-curl -x socks5h://127.0.0.1:1080 https://ifconfig.me
+If forwarding to a web server, open http://127.0.0.1:LISTEN_PORT in your browser.
 
 ## Easy Start
 
@@ -192,7 +204,7 @@ if %errorlevel% neq 0 (
 
 echo.
 echo [INFO] Starting SMTP Tunnel...
-echo [INFO] SOCKS5 proxy will be available at 127.0.0.1:1080
+echo [INFO] See config.yaml for port forwarding settings
 echo.
 echo Press Ctrl+C to stop
 echo ─────────────────────────────────────────────────────────────
@@ -276,7 +288,7 @@ fi
 
 echo ""
 echo -e "${{GREEN}}[INFO]${{NC}} Starting SMTP Tunnel..."
-echo -e "${{GREEN}}[INFO]${{NC}} SOCKS5 proxy will be available at 127.0.0.1:1080"
+echo -e "${{GREEN}}[INFO]${{NC}} See config.yaml for port forwarding settings"
 echo ""
 echo -e "Press ${{YELLOW}}Ctrl+C${{NC}} to stop"
 echo "─────────────────────────────────────────────────────────────"
@@ -324,13 +336,17 @@ Examples:
     parser.add_argument('--no-logging', action='store_true', help='Disable logging for this user')
     parser.add_argument('--users-file', '-u', default='/etc/smtp-tunnel/users.yaml', help='Users file (default: /etc/smtp-tunnel/users.yaml)')
     parser.add_argument('--config', '-c', default='/etc/smtp-tunnel/config.yaml', help='Server config file (default: /etc/smtp-tunnel/config.yaml)')
+    parser.add_argument('--forward-host', default='127.0.0.1',
+                        help='Forward target host (default: 127.0.0.1)')
+    parser.add_argument('--forward-port', type=int, default=2090,
+                        help='Forward target port (default: 2090)')
     parser.add_argument('--output-dir', '-o', default='.', help='Output directory for ZIP file (default: current)')
     parser.add_argument('--no-package', action='store_true', help='Do not generate client ZIP package')
 
     args = parser.parse_args()
 
     # Get base directory (where this script is located)
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    base_dir = os.path.dirname(os.path.realpath(__file__))
 
     # Load existing users
     users_file = args.users_file
@@ -389,7 +405,9 @@ Examples:
             server_host=server_host,
             server_port=server_port,
             base_dir=base_dir,
-            output_dir=output_dir
+            output_dir=output_dir,
+            forward_host=args.forward_host,
+            forward_port=args.forward_port
         )
 
         print(f"Client package created: {zip_path}")
