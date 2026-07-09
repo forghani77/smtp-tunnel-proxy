@@ -283,8 +283,10 @@ server:
 client:
   server_host: "$DOMAIN_NAME"
   server_port: 587
-  socks_port: 1080
-  socks_host: "127.0.0.1"
+  listen_host: "127.0.0.1"
+  listen_port: 2090
+  forward_host: "127.0.0.1"
+  forward_port: 2090
   ca_cert: "ca.crt"
 EOF
 
@@ -329,15 +331,28 @@ EOF
 
         if [ -n "$FIRST_USER" ]; then
             echo ""
+            print_ask "What port is the destination service listening on the server?"
+            echo -e "    ${YELLOW}e.g. if you want to forward port 2090 from the server, enter 2090${NC}"
+            read -p "    Forward port: " FWD_PORT < /dev/tty
+            FWD_PORT="${FWD_PORT:-2090}"
+
+            print_ask "Destination host (default: 127.0.0.1):"
+            read -p "    Forward host: " FWD_HOST < /dev/tty
+            FWD_HOST="${FWD_HOST:-127.0.0.1}"
+
+            echo ""
             print_step "Creating user '$FIRST_USER'..."
 
             cd "$INSTALL_DIR"
-            if python3 smtp-tunnel-adduser "$FIRST_USER"; then
+            if python3 smtp-tunnel-adduser "$FIRST_USER" \
+                --forward-host "$FWD_HOST" --forward-port "$FWD_PORT"; then
                 echo ""
                 print_info "User '$FIRST_USER' created successfully!"
                 print_info "Client package: $INSTALL_DIR/${FIRST_USER}.zip"
                 echo ""
                 echo -e "    ${YELLOW}Send this ZIP file to the user - it contains everything needed to connect!${NC}"
+                echo ""
+                echo -e "    The client will forward ${YELLOW}127.0.0.1:${FWD_PORT}${NC} -> tunnel -> ${YELLOW}${FWD_HOST}:${FWD_PORT}${NC}"
             else
                 print_warn "Failed to create user. You can create users later with:"
                 echo "    smtp-tunnel-adduser <username>"
