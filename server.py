@@ -21,6 +21,7 @@ import logging
 import argparse
 import struct
 import os
+import socket
 from typing import Dict, Optional
 from dataclasses import dataclass
 
@@ -312,6 +313,10 @@ class TunnelSession:
                     asyncio.open_connection(host, port),
                     timeout=30.0
                 )
+
+                sock = writer.transport.get_extra_info('socket')
+                if sock:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
                 channel = Channel(
                     channel_id=channel_id,

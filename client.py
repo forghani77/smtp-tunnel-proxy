@@ -21,6 +21,7 @@ import argparse
 import struct
 import time
 import os
+import socket
 from typing import Dict, Optional, Tuple
 from dataclasses import dataclass
 
@@ -93,6 +94,10 @@ class TunnelClient:
                 asyncio.open_connection(self.config.server_host, self.config.server_port),
                 timeout=30.0
             )
+
+            sock = self.writer.transport.get_extra_info('socket')
+            if sock:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
             # SMTP Handshake
             if not await self._smtp_handshake():
