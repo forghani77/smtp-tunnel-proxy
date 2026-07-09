@@ -187,6 +187,8 @@ install_files() {
 install_python_packages() {
     print_step "Installing Python packages..."
 
+    pip3 install --break-system-packages -q -r "$INSTALL_DIR/requirements.txt" 2>/dev/null || \
+    pip3 install --break-system-packages -q -r "$INSTALL_DIR/requirements.txt" 2>/dev/null || \
     pip3 install --root-user-action=ignore -q -r "$INSTALL_DIR/requirements.txt" 2>/dev/null || \
     pip3 install -q -r "$INSTALL_DIR/requirements.txt"
 

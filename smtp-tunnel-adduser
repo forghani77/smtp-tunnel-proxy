@@ -112,7 +112,7 @@ def create_client_package(
 ## Quick Start
 
 1. Install dependencies:
-   pip install -r requirements.txt
+    pip install --break-system-packages -r requirements.txt
 
 2. Run the client:
    python client.py
@@ -193,7 +193,7 @@ echo [INFO] Checking dependencies...
 %PYTHON% -c "import yaml" >nul 2>&1
 if %errorlevel% neq 0 (
     echo [INFO] Installing dependencies...
-    %PYTHON% -m pip install -r requirements.txt --quiet
+    %PYTHON% -m pip install --break-system-packages -r requirements.txt --quiet 2>nul || %PYTHON% -m pip install -r requirements.txt --quiet
     if %errorlevel% neq 0 (
         echo [ERROR] Failed to install dependencies
         pause
@@ -277,10 +277,11 @@ echo -e "${{GREEN}}[INFO]${{NC}} Found Python: $PYTHON"
 echo -e "${{GREEN}}[INFO]${{NC}} Checking dependencies..."
 if ! $PYTHON -c "import yaml" &> /dev/null; then
     echo -e "${{YELLOW}}[INFO]${{NC}} Installing dependencies..."
+    $PYTHON -m pip install --break-system-packages -r requirements.txt --quiet 2>/dev/null || \
     $PYTHON -m pip install -r requirements.txt --quiet
     if [ $? -ne 0 ]; then
         echo -e "${{RED}}[ERROR]${{NC}} Failed to install dependencies"
-        echo "Try running: $PYTHON -m pip install -r requirements.txt"
+        echo "Try running: $PYTHON -m pip install --break-system-packages -r requirements.txt"
         exit 1
     fi
     echo -e "${{GREEN}}[INFO]${{NC}} Dependencies installed"
@@ -414,7 +415,7 @@ Examples:
         print()
         print("Send this ZIP file to the user. They just need to:")
         print("  1. Extract the ZIP")
-        print("  2. pip install -r requirements.txt")
+        print("  2. pip install --break-system-packages -r requirements.txt")
         print("  3. python client.py")
 
     return 0
