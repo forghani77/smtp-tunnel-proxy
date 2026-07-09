@@ -26,6 +26,7 @@ BIN_DIR="/usr/local/bin"
 # Files to download
 PYTHON_FILES="server.py client.py common.py generate_certs.py"
 SCRIPTS="smtp-tunnel-adduser smtp-tunnel-deluser smtp-tunnel-listusers smtp-tunnel-update"
+EXTRA_FILES="uninstall.sh"
 
 # Print functions
 print_info() {
@@ -161,6 +162,16 @@ install_files() {
         print_info "  Linked: $script -> $BIN_DIR/$script"
     done
 
+    # Download extra files
+    for file in $EXTRA_FILES; do
+        if ! download_file "$file" "$INSTALL_DIR/$file"; then
+            print_error "Failed to download: $file"
+            exit 1
+        fi
+        chmod +x "$INSTALL_DIR/$file"
+        print_info "  Installed: $file"
+    done
+
     # Download config template
     download_file "config.yaml" "$INSTALL_DIR/config.yaml.template" || true
 
@@ -213,31 +224,6 @@ EOF
 
 # Create uninstall script
 create_uninstall_script() {
-    cat > "$INSTALL_DIR/uninstall.sh" << 'EOF'
-#!/bin/bash
-# SMTP Tunnel Proxy - Uninstall Script
-
-echo "Stopping service..."
-systemctl stop smtp-tunnel 2>/dev/null || true
-systemctl disable smtp-tunnel 2>/dev/null || true
-
-echo "Removing files..."
-rm -f /etc/systemd/system/smtp-tunnel.service
-rm -f /usr/local/bin/smtp-tunnel-adduser
-rm -f /usr/local/bin/smtp-tunnel-deluser
-rm -f /usr/local/bin/smtp-tunnel-listusers
-rm -rf /opt/smtp-tunnel
-
-echo ""
-echo "Note: Configuration in /etc/smtp-tunnel was NOT removed"
-echo "Remove manually if needed: rm -rf /etc/smtp-tunnel"
-
-systemctl daemon-reload
-
-echo ""
-echo "SMTP Tunnel Proxy uninstalled successfully"
-EOF
-
     chmod +x "$INSTALL_DIR/uninstall.sh"
     print_info "Created: $INSTALL_DIR/uninstall.sh"
 }
