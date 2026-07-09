@@ -65,7 +65,7 @@ Example: `myserver.duckdns.org` → `203.0.113.50` (your VPS IP)
 ### Step 2️⃣: Run the Installer
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/x011/smtp-tunnel-proxy/main/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/forghani77/smtp-tunnel-proxy/main/install.sh | sudo bash
 ```
 
 The installer will:
@@ -125,7 +125,7 @@ Listening on 127.0.0.1:2090 -> 127.0.0.1:2090
 
 ```bash
 cd alice
-pip install -r requirements.txt
+pip install --break-system-packages -r requirements.txt
 python client.py
 ```
 
@@ -169,6 +169,9 @@ python client.py --listen-port 8080 --forward-host 10.0.0.5 --forward-port 80
 
 # Forward local port 3306 to a database behind the server
 python client.py --listen-port 3306 --forward-host db.internal --forward-port 3306
+
+# Expose on 0.0.0.0 so other machines on your LAN can connect
+python client.py --listen-host 0.0.0.0 --listen-port 2090 --forward-host 127.0.0.1 --forward-port 2090
 ```
 
 ### ✅ Test Connection
@@ -287,7 +290,9 @@ python client.py [-c CONFIG] [--server HOST] [--server-port PORT]
 
 ### 👥 User Management
 ```bash
-smtp-tunnel-adduser <username> [-u USERS_FILE] [-c CONFIG] [--no-zip]
+smtp-tunnel-adduser <username> [-u USERS_FILE] [-c CONFIG]
+                     [--listen-host HOST] [--forward-host HOST]
+                     [--forward-port PORT] [--no-package]
     Add a new user and generate client package
 
 smtp-tunnel-deluser <username> [-u USERS_FILE] [-f]
@@ -319,6 +324,7 @@ smtp_proxy/
 ├── 🔧 smtp-tunnel-deluser     # Remove user script
 ├── 🔧 smtp-tunnel-listusers   # List users script
 ├── 🔧 smtp-tunnel-update      # Update server script
+├── 🔧 uninstall.sh            # Uninstall script
 ├── 📄 README.md               # This file
 └── 📄 TECHNICAL.md            # Technical documentation
 ```
@@ -327,6 +333,10 @@ smtp_proxy/
 
 ```
 /opt/smtp-tunnel/              # Application files
+  ├── server.py
+  ├── client.py
+  ├── common.py
+  ├── uninstall.sh
 /etc/smtp-tunnel/              # Configuration files
   ├── config.yaml
   ├── users.yaml
