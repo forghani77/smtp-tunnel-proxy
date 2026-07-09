@@ -768,8 +768,10 @@ class ClientConfig:
     """Client configuration."""
     server_host: str = 'localhost'
     server_port: int = 587
-    socks_port: int = 1080
-    socks_host: str = '127.0.0.1'
+    listen_host: str = '127.0.0.1'
+    listen_port: int = 1080
+    forward_host: str = ''
+    forward_port: int = 0
     username: str = ''  # Username for multi-user auth
     secret: str = ''
 

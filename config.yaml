@@ -39,11 +39,13 @@ client:
   # Tunnel server port
   server_port: 587
 
-  # Local SOCKS5 proxy port
-  socks_port: 1080
+  # Local listen address/port for port forwarding
+  listen_host: "127.0.0.1"
+  listen_port: 1080
 
-  # Local SOCKS5 bind address (127.0.0.1 = localhost only)
-  socks_host: "127.0.0.1"
+  # Forward target: connections received on listen_port are tunneled here
+  forward_host: "localhost"
+  forward_port: 25
 
   # Username and secret are set per-user in generated client configs
   # username: "set-by-adduser"

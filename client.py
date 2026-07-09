@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-SMTP Tunnel Client - Fast Binary Mode
+SMTP Tunnel Client - Port Forwarding Mode
 
-Version: 1.3.0
+Version: 1.4.0
 
 Protocol:
 1. SMTP handshake (EHLO, STARTTLS, AUTH) - looks like real SMTP
@@ -11,6 +11,7 @@ Protocol:
 
 Features:
 - Multi-user support (username + secret authentication)
+- Port forwarding: forwards local connections to a remote target through the tunnel
 """
 
 import asyncio
@@ -20,7 +21,6 @@ import argparse
 import struct
 import time
 import os
-import socket
 from typing import Dict, Optional, Tuple
 from dataclasses import dataclass
 
@@ -50,21 +50,6 @@ def make_frame(frame_type: int, channel_id: int, payload: bytes = b'') -> bytes:
 def make_connect_payload(host: str, port: int) -> bytes:
     host_bytes = host.encode('utf-8')
     return struct.pack('>B', len(host_bytes)) + host_bytes + struct.pack('>H', port)
-
-
-# ============================================================================
-# SOCKS5
-# ============================================================================
-
-class SOCKS5:
-    VERSION = 0x05
-    AUTH_NONE = 0x00
-    CMD_CONNECT = 0x01
-    ATYP_IPV4 = 0x01
-    ATYP_DOMAIN = 0x03
-    ATYP_IPV6 = 0x04
-    REP_SUCCESS = 0x00
-    REP_FAILURE = 0x01
 
 
 @dataclass
@@ -365,90 +350,49 @@ class TunnelClient:
 
 
 # ============================================================================
-# SOCKS5 Server
+# Port Forwarding
 # ============================================================================
 
-class SOCKS5Server:
-    def __init__(self, tunnel: TunnelClient, host: str = '127.0.0.1', port: int = 1080):
+class PortForward:
+    def __init__(self, tunnel: TunnelClient, listen_host: str = '127.0.0.1',
+                 listen_port: int = 1080, forward_host: str = '',
+                 forward_port: int = 0):
         self.tunnel = tunnel
-        self.host = host
-        self.port = port
+        self.listen_host = listen_host
+        self.listen_port = listen_port
+        self.forward_host = forward_host
+        self.forward_port = forward_port
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        """Handle SOCKS5 client."""
+        """Handle incoming connection by forwarding through tunnel."""
         channel = None
         try:
-            # Check tunnel is connected
             if not self.tunnel.connected:
                 writer.close()
                 return
 
-            # SOCKS5 handshake
-            data = await reader.read(2)
-            if len(data) < 2 or data[0] != SOCKS5.VERSION:
-                return
+            logger.info(f"Forwarding {writer.get_extra_info('peername')} -> {self.forward_host}:{self.forward_port}")
 
-            nmethods = data[1]
-            await reader.read(nmethods)
-
-            writer.write(bytes([SOCKS5.VERSION, SOCKS5.AUTH_NONE]))
-            await writer.drain()
-
-            # Request
-            data = await reader.read(4)
-            if len(data) < 4:
-                return
-
-            version, cmd, _, atyp = data
-
-            if cmd != SOCKS5.CMD_CONNECT:
-                writer.write(bytes([SOCKS5.VERSION, 0x07, 0, 1, 0, 0, 0, 0, 0, 0]))
-                await writer.drain()
-                return
-
-            # Parse address
-            if atyp == SOCKS5.ATYP_IPV4:
-                addr_data = await reader.read(4)
-                host = socket.inet_ntoa(addr_data)
-            elif atyp == SOCKS5.ATYP_DOMAIN:
-                length = (await reader.read(1))[0]
-                host = (await reader.read(length)).decode()
-            elif atyp == SOCKS5.ATYP_IPV6:
-                addr_data = await reader.read(16)
-                host = socket.inet_ntop(socket.AF_INET6, addr_data)
-            else:
-                return
-
-            port_data = await reader.read(2)
-            port = struct.unpack('>H', port_data)[0]
-
-            logger.info(f"CONNECT {host}:{port}")
-
-            # Open tunnel
-            channel_id, success = await self.tunnel.open_channel(host, port)
+            channel_id, success = await self.tunnel.open_channel(
+                self.forward_host, self.forward_port
+            )
 
             if success:
-                writer.write(bytes([SOCKS5.VERSION, SOCKS5.REP_SUCCESS, 0, 1, 0, 0, 0, 0, 0, 0]))
-                await writer.drain()
-
                 channel = Channel(
                     channel_id=channel_id,
                     reader=reader,
                     writer=writer,
-                    host=host,
-                    port=port,
+                    host=self.forward_host,
+                    port=self.forward_port,
                     connected=True
                 )
                 self.tunnel.channels[channel_id] = channel
-
-                # Forward loop
                 await self._forward_loop(channel)
             else:
-                writer.write(bytes([SOCKS5.VERSION, SOCKS5.REP_FAILURE, 0, 1, 0, 0, 0, 0, 0, 0]))
-                await writer.drain()
+                writer.close()
 
         except Exception as e:
-            logger.debug(f"SOCKS error: {e}")
+            logger.debug(f"Forward error: {e}")
         finally:
             if channel:
                 await self.tunnel.close_channel_remote(channel.channel_id)
@@ -460,7 +404,7 @@ class SOCKS5Server:
                 pass
 
     async def _forward_loop(self, channel: Channel):
-        """Forward data from SOCKS client to tunnel."""
+        """Forward data from local client to tunnel."""
         try:
             while channel.connected and self.tunnel.connected:
                 try:
@@ -473,15 +417,6 @@ class SOCKS5Server:
                     continue
         except:
             pass
-
-    async def start(self):
-        """Start SOCKS5 server."""
-        server = await asyncio.start_server(self.handle_client, self.host, self.port)
-        addr = server.sockets[0].getsockname()
-        logger.info(f"SOCKS5 proxy on {addr[0]}:{addr[1]}")
-
-        async with server:
-            await server.serve_forever()
 
 
 # ============================================================================
@@ -510,34 +445,32 @@ async def run_client(config: ClientConfig, ca_cert: str):
         # Start receiver in background
         receiver_task = asyncio.create_task(tunnel._receiver_loop())
 
-        # Start SOCKS server
-        socks = SOCKS5Server(tunnel, config.socks_host, config.socks_port)
+        # Start port forwarder
+        forwarder = PortForward(tunnel, config.listen_host, config.listen_port,
+                                config.forward_host, config.forward_port)
 
         try:
-            # Create SOCKS server but don't block on it
-            socks_server = await asyncio.start_server(
-                socks.handle_client,
-                socks.host,
-                socks.port,
-                reuse_address=True  # Allow quick rebind after restart
+            # Create port forward server
+            fwd_server = await asyncio.start_server(
+                forwarder.handle_client,
+                forwarder.listen_host,
+                forwarder.listen_port,
+                reuse_address=True
             )
-            addr = socks_server.sockets[0].getsockname()
-            logger.info(f"SOCKS5 proxy on {addr[0]}:{addr[1]}")
+            addr = fwd_server.sockets[0].getsockname()
+            logger.info(f"Listening on {addr[0]}:{addr[1]} -> {forwarder.forward_host}:{forwarder.forward_port}")
 
-            # Wait for either: receiver dies (connection lost) or KeyboardInterrupt
-            async with socks_server:
+            async with fwd_server:
                 try:
-                    # Wait for receiver to finish (means connection lost)
                     await receiver_task
                 except asyncio.CancelledError:
                     pass
 
-            # Connection lost - reconnect immediately
             if tunnel.connected:
                 tunnel.connected = False
 
             logger.warning("Connection lost, reconnecting...")
-            current_delay = reconnect_delay  # Reset delay for next failure
+            current_delay = reconnect_delay
 
         except KeyboardInterrupt:
             logger.info("Shutting down...")
@@ -545,10 +478,10 @@ async def run_client(config: ClientConfig, ca_cert: str):
             return 0
         except OSError as e:
             if "Address already in use" in str(e):
-                logger.error(f"Port {socks.port} already in use, waiting...")
+                logger.error(f"Port {forwarder.listen_port} already in use, waiting...")
                 await asyncio.sleep(2)
             else:
-                logger.error(f"SOCKS server error: {e}")
+                logger.error(f"Forward server error: {e}")
         finally:
             await tunnel.disconnect()
             receiver_task.cancel()
@@ -561,11 +494,18 @@ async def run_client(config: ClientConfig, ca_cert: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='SMTP Tunnel Client (Fast)')
+    parser = argparse.ArgumentParser(description='SMTP Tunnel Client with Port Forwarding')
     parser.add_argument('--config', '-c', default='config.yaml')
     parser.add_argument('--server', default=None, help='Server domain name (FQDN required for TLS)')
     parser.add_argument('--server-port', type=int, default=None)
-    parser.add_argument('--socks-port', '-p', type=int, default=None)
+    parser.add_argument('--listen-port', '-p', type=int, default=None,
+                        help='Local port to listen on')
+    parser.add_argument('--listen-host', default=None,
+                        help='Local address to bind to')
+    parser.add_argument('--forward-host', default=None,
+                        help='Target host to forward connections to')
+    parser.add_argument('--forward-port', type=int, default=None,
+                        help='Target port to forward connections to')
     parser.add_argument('--username', '-u', default=None, help='Username for authentication')
     parser.add_argument('--secret', '-s', default=None)
     parser.add_argument('--ca-cert', default=None)
@@ -582,11 +522,19 @@ def main():
 
     client_conf = config_data.get('client', {})
 
+    # Backward compat: map old socks_port/socks_host to listen_port/listen_host
+    listen_port = args.listen_port or client_conf.get('listen_port') or \
+                  client_conf.get('socks_port', 1080)
+    listen_host = args.listen_host or client_conf.get('listen_host') or \
+                  client_conf.get('socks_host', '127.0.0.1')
+
     config = ClientConfig(
         server_host=args.server or client_conf.get('server_host', 'localhost'),
         server_port=args.server_port or client_conf.get('server_port', 587),
-        socks_port=args.socks_port or client_conf.get('socks_port', 1080),
-        socks_host=client_conf.get('socks_host', '127.0.0.1'),
+        listen_host=listen_host,
+        listen_port=listen_port,
+        forward_host=args.forward_host or client_conf.get('forward_host', ''),
+        forward_port=args.forward_port or client_conf.get('forward_port', 0),
         username=args.username or client_conf.get('username', ''),
         secret=args.secret or client_conf.get('secret', ''),
     )
@@ -599,6 +547,10 @@ def main():
 
     if not config.secret:
         logger.error("No secret configured!")
+        return 1
+
+    if not config.forward_host or not config.forward_port:
+        logger.error("Forward target not configured! Use --forward-host and --forward-port")
         return 1
 
     try:
