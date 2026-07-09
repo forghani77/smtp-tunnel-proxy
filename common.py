@@ -768,6 +768,7 @@ class ClientConfig:
     """Client configuration."""
     server_host: str = 'localhost'
     server_port: int = 587
+    mode: str = 'forward'  # 'forward' or 'socks'
     listen_host: str = '127.0.0.1'
     listen_port: int = 1080
     forward_host: str = ''

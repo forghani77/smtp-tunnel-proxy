@@ -156,22 +156,31 @@ python client.py -c config.yaml
 
 ## 📖 Usage
 
-### 🔀 Port Forwarding
+### 🔀 Client Modes
 
-The client forwards a local port through the SMTP tunnel to a destination reachable from the server.
+The client supports two modes: **port forward** (fixed target) and **SOCKS5 proxy** (dynamic target).
+
+#### Port Forward Mode
 
 ```bash
 # Forward local port 2090 to a service on the server's localhost
-python client.py --listen-port 2090 --forward-host 127.0.0.1 --forward-port 2090
+python client.py --mode forward --listen-port 2090 --forward-host 127.0.0.1 --forward-port 2090
 
 # Forward local port 8080 to an internal web server
-python client.py --listen-port 8080 --forward-host 10.0.0.5 --forward-port 80
-
-# Forward local port 3306 to a database behind the server
-python client.py --listen-port 3306 --forward-host db.internal --forward-port 3306
+python client.py --mode forward --listen-port 8080 --forward-host 10.0.0.5 --forward-port 80
 
 # Expose on 0.0.0.0 so other machines on your LAN can connect
-python client.py --listen-host 0.0.0.0 --listen-port 2090 --forward-host 127.0.0.1 --forward-port 2090
+python client.py --mode forward --listen-host 0.0.0.0 --listen-port 2090 --forward-host 127.0.0.1 --forward-port 2090
+```
+
+#### SOCKS5 Proxy Mode
+
+```bash
+# Listen as SOCKS5 proxy on default port 1080
+python client.py --mode socks
+
+# Listen on a different port/interface
+python client.py --mode socks --listen-host 0.0.0.0 --listen-port 8888
 ```
 
 ### ✅ Test Connection
@@ -230,10 +239,11 @@ users:
 |--------|-------------|---------|
 | `server_host` | Server domain name | Required |
 | `server_port` | Server port | `587` |
+| `mode` | Client mode: `forward` or `socks` | `forward` |
 | `listen_port` | Local port to listen on | `1080` |
 | `listen_host` | Local interface to bind to | `127.0.0.1` |
-| `forward_host` | Destination host (reachable from server) | Required |
-| `forward_port` | Destination port | Required |
+| `forward_host` | Destination host (forward mode, reachable from server) | Required |
+| `forward_port` | Destination port (forward mode) | Required |
 | `username` | Your username | Required |
 | `secret` | Your authentication secret | Required |
 | `ca_cert` | CA certificate for verification | Recommended |
@@ -271,17 +281,19 @@ python server.py [-c CONFIG] [-d]
 ### 💻 Client
 ```bash
 python client.py [-c CONFIG] [--server HOST] [--server-port PORT]
-                 [-p LISTEN_PORT] [--listen-host HOST]
-                 [--forward-host HOST] [--forward-port PORT]
-                 [-u USERNAME] [-s SECRET] [--ca-cert FILE] [-d]
+                 [--mode forward|socks] [-p LISTEN_PORT]
+                 [--listen-host HOST] [--forward-host HOST]
+                 [--forward-port PORT] [-u USERNAME] [-s SECRET]
+                 [--ca-cert FILE] [-d]
 
   -c, --config        Config file (default: config.yaml)
   --server            Override server domain
   --server-port       Override server port
+  --mode              Client mode: forward or socks (default: forward)
   -p, --listen-port   Local port to listen on
   --listen-host       Local interface to bind to
-  --forward-host      Forward destination host
-  --forward-port      Forward destination port
+  --forward-host      Forward destination host (forward mode)
+  --forward-port      Forward destination port (forward mode)
   -u, --username      Your username
   -s, --secret        Override secret
   --ca-cert           CA certificate path
@@ -291,8 +303,9 @@ python client.py [-c CONFIG] [--server HOST] [--server-port PORT]
 ### 👥 User Management
 ```bash
 smtp-tunnel-adduser <username> [-u USERS_FILE] [-c CONFIG]
-                     [--listen-host HOST] [--forward-host HOST]
-                     [--forward-port PORT] [--no-package]
+                     [--mode forward|socks] [--listen-host HOST]
+                     [--forward-host HOST] [--forward-port PORT]
+                     [--no-package]
     Add a new user and generate client package
 
 smtp-tunnel-deluser <username> [-u USERS_FILE] [-f]

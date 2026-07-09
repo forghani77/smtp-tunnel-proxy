@@ -29,9 +29,33 @@ def generate_secret() -> str:
 def create_client_config(
     server_host: str, server_port: int, username: str, secret: str,
     forward_host: str = '', forward_port: int = 0,
-    listen_host: str = '127.0.0.1'
+    listen_host: str = '127.0.0.1', mode: str = 'forward'
 ) -> str:
     """Generate client config.yaml content."""
+
+    if mode == 'socks':
+        return f"""# SMTP Tunnel Client Configuration
+# Generated for user: {username}
+
+client:
+  # Server connection
+  server_host: "{server_host}"
+  server_port: {server_port}
+
+  # Authentication
+  username: "{username}"
+  secret: "{secret}"
+
+  # SOCKS5 proxy
+  mode: "socks"
+  listen_host: "{listen_host}"
+  listen_port: {forward_port if forward_port else 1080}
+
+  # CA certificate for server verification
+  ca_cert: "ca.crt"
+"""
+
+    # forward mode
     fwd_host = forward_host if forward_host else '127.0.0.1'
     fwd_port = forward_port if forward_port else 2090
     return f"""# SMTP Tunnel Client Configuration
@@ -47,6 +71,7 @@ client:
   secret: "{secret}"
 
   # Port forwarding
+  mode: "forward"
   listen_host: "{listen_host}"
   listen_port: {fwd_port}
   forward_host: "{fwd_host}"
@@ -66,7 +91,8 @@ def create_client_package(
     output_dir: str,
     forward_host: str = '',
     forward_port: int = 0,
-    listen_host: str = '127.0.0.1'
+    listen_host: str = '127.0.0.1',
+    mode: str = 'forward'
 ) -> str:
     """
     Create a ZIP package with everything the client needs.
@@ -103,13 +129,14 @@ def create_client_package(
         # Generate client config
         config_content = create_client_config(
             server_host, server_port, username, secret,
-            forward_host, forward_port, listen_host
+            forward_host, forward_port, listen_host, mode
         )
         config_path = os.path.join(pkg_dir, 'config.yaml')
         with open(config_path, 'w') as f:
             f.write(config_content)
 
-        # Create README for the user
+        description = ("acts as a SOCKS5 proxy at" if mode == 'socks'
+                       else f"forwards 127.0.0.1:{forward_port or 2090} to {forward_host or '127.0.0.1'}:{forward_port or 2090}")
         readme_content = f"""# SMTP Tunnel Client - {username}
 
 ## Quick Start
@@ -133,12 +160,11 @@ def create_client_package(
 
 ## What it does
 
-The client listens on a local port and forwards all connections
-through the SMTP tunnel to the destination configured in config.yaml.
+The client {description} through the SMTP tunnel.
 
 ## Test Connection
 
-If forwarding to a web server, open http://127.0.0.1:LISTEN_PORT in your browser.
+If forwarding to a web server, open http://127.0.0.1:PORT in your browser.
 
 ## Easy Start
 
@@ -209,7 +235,7 @@ if %errorlevel% neq 0 (
 
 echo.
 echo [INFO] Starting SMTP Tunnel...
-echo [INFO] See config.yaml for port forwarding settings
+echo [INFO] See config.yaml for settings
 echo.
 echo Press Ctrl+C to stop
 echo ─────────────────────────────────────────────────────────────
@@ -384,10 +410,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s alice                    # Add user 'alice' with auto-generated secret
-  %(prog)s bob --secret mysecret    # Add user 'bob' with specific secret
-  %(prog)s carol --whitelist 1.2.3.4 --whitelist 10.0.0.0/8
-  %(prog)s dave --no-logging        # Add user without logging
+  %(prog)s alice                            # Port forward mode (default)
+  %(prog)s bob --mode socks                 # SOCKS5 proxy mode
+  %(prog)s carol --mode forward --forward-host db.internal --forward-port 5432
+  %(prog)s dave --secret mysecret           # With specific secret
+  %(prog)s eve --whitelist 1.2.3.4          # With IP whitelist
 """
     )
     parser.add_argument('username', help='Username to add')
@@ -396,6 +423,8 @@ Examples:
     parser.add_argument('--no-logging', action='store_true', help='Disable logging for this user')
     parser.add_argument('--users-file', '-u', default='/etc/smtp-tunnel/users.yaml', help='Users file (default: /etc/smtp-tunnel/users.yaml)')
     parser.add_argument('--config', '-c', default='/etc/smtp-tunnel/config.yaml', help='Server config file (default: /etc/smtp-tunnel/config.yaml)')
+    parser.add_argument('--mode', default='forward', choices=['forward', 'socks'],
+                        help='Client mode: forward (port forward) or socks (SOCKS5 proxy)')
     parser.add_argument('--listen-host', default='127.0.0.1',
                         help='Local listen address (default: 127.0.0.1)')
     parser.add_argument('--forward-host', default='127.0.0.1',
@@ -470,12 +499,14 @@ Examples:
             output_dir=output_dir,
             forward_host=args.forward_host,
             forward_port=args.forward_port,
-            listen_host=args.listen_host
+            listen_host=args.listen_host,
+            mode=args.mode
         )
 
         print(f"Client package created: {zip_path}")
         print()
-        print("Send this ZIP file to the user. They just need to:")
+        mode_label = "SOCKS5 proxy" if args.mode == 'socks' else "port forward"
+        print(f"Send this ZIP file to the user ({mode_label}). They just need to:")
         print("  1. Extract the ZIP")
         print("  2. sudo bash install.sh  (Linux) or double-click start.bat (Windows)")
         print("")

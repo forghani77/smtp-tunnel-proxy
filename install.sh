@@ -298,6 +298,7 @@ server:
 client:
   server_host: "$DOMAIN_NAME"
   server_port: 587
+  mode: "forward"
   listen_host: "127.0.0.1"
   listen_port: 2090
   forward_host: "127.0.0.1"
@@ -346,34 +347,58 @@ EOF
 
         if [ -n "$FIRST_USER" ]; then
             echo ""
-            print_ask "What port is the destination service listening on the server?"
-            echo -e "    ${YELLOW}e.g. if you want to forward port 2090 from the server, enter 2090${NC}"
-            read -p "    Forward port: " FWD_PORT < /dev/tty
-            FWD_PORT="${FWD_PORT:-2090}"
+            print_ask "Client mode: (1) Port forward or (2) SOCKS5 proxy? [1/2]: "
+            read -p "    Mode: " CLIENT_MODE < /dev/tty
 
-            print_ask "Destination host (default: 127.0.0.1):"
-            read -p "    Forward host: " FWD_HOST < /dev/tty
-            FWD_HOST="${FWD_HOST:-127.0.0.1}"
+            MODE_ARGS=""
 
-            print_ask "Local listen address (default: 127.0.0.1):"
-            echo -e "    ${YELLOW}Use 0.0.0.0 to allow connections from other machines${NC}"
-            read -p "    Listen host: " LISTEN_HOST < /dev/tty
-            LISTEN_HOST="${LISTEN_HOST:-127.0.0.1}"
+            if [ "$CLIENT_MODE" = "2" ] || [ "$CLIENT_MODE" = "socks" ]; then
+                MODE_ARGS="--mode socks"
+                print_ask "SOCKS5 listen port (default: 1080):"
+                read -p "    Port: " SOCKS_PORT < /dev/tty
+                SOCKS_PORT="${SOCKS_PORT:-1080}"
+
+                print_ask "SOCKS5 listen address (default: 127.0.0.1):"
+                echo -e "    ${YELLOW}Use 0.0.0.0 to allow connections from other machines${NC}"
+                read -p "    Listen host: " LISTEN_HOST < /dev/tty
+                LISTEN_HOST="${LISTEN_HOST:-127.0.0.1}"
+
+                MODE_ARGS="$MODE_ARGS --listen-host $LISTEN_HOST --forward-port $SOCKS_PORT"
+            else
+                print_ask "What port is the destination service listening on the server?"
+                echo -e "    ${YELLOW}e.g. if you want to forward port 2090 from the server, enter 2090${NC}"
+                read -p "    Forward port: " FWD_PORT < /dev/tty
+                FWD_PORT="${FWD_PORT:-2090}"
+
+                print_ask "Destination host (default: 127.0.0.1):"
+                read -p "    Forward host: " FWD_HOST < /dev/tty
+                FWD_HOST="${FWD_HOST:-127.0.0.1}"
+
+                print_ask "Local listen address (default: 127.0.0.1):"
+                echo -e "    ${YELLOW}Use 0.0.0.0 to allow connections from other machines${NC}"
+                read -p "    Listen host: " LISTEN_HOST < /dev/tty
+                LISTEN_HOST="${LISTEN_HOST:-127.0.0.1}"
+
+                MODE_ARGS="$MODE_ARGS --forward-host $FWD_HOST --forward-port $FWD_PORT --listen-host $LISTEN_HOST"
+            fi
 
             echo ""
             print_step "Creating user '$FIRST_USER'..."
 
             cd "$INSTALL_DIR"
-            if python3 smtp-tunnel-adduser "$FIRST_USER" \
-                --forward-host "$FWD_HOST" --forward-port "$FWD_PORT" \
-                --listen-host "$LISTEN_HOST"; then
+            if python3 smtp-tunnel-adduser "$FIRST_USER" $MODE_ARGS; then
                 echo ""
                 print_info "User '$FIRST_USER' created successfully!"
                 print_info "Client package: $INSTALL_DIR/${FIRST_USER}.zip"
                 echo ""
                 echo -e "    ${YELLOW}Send this ZIP file to the user - it contains everything needed to connect!${NC}"
-                echo ""
-                echo -e "    The client will forward ${YELLOW}${LISTEN_HOST}:${FWD_PORT}${NC} -> tunnel -> ${YELLOW}${FWD_HOST}:${FWD_PORT}${NC}"
+                if [ "$CLIENT_MODE" = "2" ] || [ "$CLIENT_MODE" = "socks" ]; then
+                    echo ""
+                    echo -e "    Client runs as a SOCKS5 proxy at ${YELLOW}${LISTEN_HOST}:${SOCKS_PORT}${NC}"
+                else
+                    echo ""
+                    echo -e "    Client forwards ${YELLOW}${LISTEN_HOST}:${FWD_PORT}${NC} -> tunnel -> ${YELLOW}${FWD_HOST}:${FWD_PORT}${NC}"
+                fi
             else
                 print_warn "Failed to create user. You can create users later with:"
                 echo "    smtp-tunnel-adduser <username>"
