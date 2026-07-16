@@ -313,6 +313,10 @@ class TunnelSession:
 
                 await self._handle_frame(frame_type, channel_id, payload)
 
+        # Close all channels when tunnel drops to prevent CLOSE-WAIT pileup
+        for channel in list(self.channels.values()):
+            await self._close_channel(channel)
+
     async def _handle_frame(self, frame_type: int, channel_id: int, payload: bytes):
         """Handle a binary frame."""
         if frame_type == FRAME_CONNECT:
@@ -349,6 +353,10 @@ class TunnelSession:
                 sock = writer.transport.get_extra_info('socket')
                 if sock:
                     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
 
                 channel = Channel(
                     channel_id=channel_id,
@@ -420,12 +428,16 @@ class TunnelSession:
         """Send binary frame to client."""
         if self.writer.is_closing():
             return
+        frame = make_frame(frame_type, channel_id, payload)
         try:
             async with self.write_lock:
-                frame = make_frame(frame_type, channel_id, payload)
                 self.writer.write(frame)
-                await self.writer.drain()
         except (ConnectionResetError, BrokenPipeError, OSError):
+            return
+        # drain outside the lock
+        try:
+            await asyncio.wait_for(self.writer.drain(), timeout=10.0)
+        except (asyncio.TimeoutError, ConnectionResetError, BrokenPipeError, OSError):
             pass
 
     async def _close_channel(self, channel: Channel):
@@ -503,6 +515,13 @@ class TunnelServer:
         return ctx
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        # Set TCP keepalive to detect dead connections fast
+        sock = writer.transport.get_extra_info('socket')
+        if sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
         session = TunnelSession(reader, writer, self.config, self.ssl_context, self.users)
         await session.run()
 

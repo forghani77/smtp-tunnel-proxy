@@ -110,6 +110,11 @@ class TunnelClient:
             sock = self.writer.transport.get_extra_info('socket')
             if sock:
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                # Detect dead tunnel fast (default Linux is 2+ hours)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
 
             # SMTP Handshake
             if not await self._smtp_handshake():
@@ -259,6 +264,9 @@ class TunnelClient:
                 break
 
         self.connected = False
+        # Close all channels immediately to prevent CLOSE-WAIT pileup
+        for channel in list(self.channels.values()):
+            await self._close_channel(channel)
 
     async def _handle_frame(self, frame_type: int, channel_id: int, payload: bytes):
         """Handle received frame."""
@@ -293,13 +301,20 @@ class TunnelClient:
         """Send frame to server."""
         if not self.connected or not self.writer:
             return
+        frame = make_frame(frame_type, channel_id, payload)
         async with self.write_lock:
+            if not self.connected:
+                return
             try:
-                frame = make_frame(frame_type, channel_id, payload)
                 self.writer.write(frame)
-                await self.writer.drain()
             except Exception:
                 self.connected = False
+                return
+        # drain outside the lock so one slow channel doesn't block all others
+        try:
+            await asyncio.wait_for(self.writer.drain(), timeout=10.0)
+        except (asyncio.TimeoutError, Exception):
+            self.connected = False
 
     async def open_channel(self, host: str, port: int) -> Tuple[int, bool]:
         """Open a tunnel channel."""
