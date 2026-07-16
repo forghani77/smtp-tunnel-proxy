@@ -27,6 +27,13 @@ server:
   # Global logging setting (can be overridden per-user)
   log_users: true
 
+  # Max concurrent channels per session (prevents resource exhaustion)
+  max_channels: 256
+
+  # Keepalive settings (detect dead connections)
+  keepalive_interval: 30   # Seconds between keepalive probes
+  keepalive_timeout: 90    # Seconds before declaring connection dead
+
 # ============================================================================
 # Client Configuration (for client.py)
 # This section is used when generating client packages
@@ -53,6 +60,13 @@ client:
 
   # CA certificate for server verification (RECOMMENDED for security)
   ca_cert: "ca.crt"
+
+  # Max concurrent channels (prevents resource exhaustion)
+  max_channels: 256
+
+  # Keepalive settings (detect dead connections)
+  keepalive_interval: 30   # Seconds between keepalive probes
+  keepalive_timeout: 90    # Seconds before declaring connection dead
 
 # ============================================================================
 # Stealth Configuration (DPI Evasion) - Optional

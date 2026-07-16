@@ -683,6 +683,9 @@ class ServerConfig:
     key_file: str = 'server.key'
     users_file: str = 'users.yaml'  # Path to users configuration
     log_users: bool = True  # Global logging setting (can be overridden per-user)
+    max_channels: int = 256  # Max concurrent channels per session
+    keepalive_interval: int = 30  # Seconds between keepalive probes
+    keepalive_timeout: int = 90  # Seconds before declaring connection dead
 
 
 class IPWhitelist:
@@ -775,6 +778,9 @@ class ClientConfig:
     forward_port: int = 0
     username: str = ''  # Username for multi-user auth
     secret: str = ''
+    max_channels: int = 256  # Max concurrent channels
+    keepalive_interval: int = 30  # Seconds between keepalive probes
+    keepalive_timeout: int = 90  # Seconds before declaring connection dead
 
 
 @dataclass

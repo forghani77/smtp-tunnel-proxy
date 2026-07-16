@@ -22,7 +22,8 @@ import argparse
 import struct
 import os
 import socket
-from typing import Dict, Optional
+import time
+from typing import Dict, Optional, Set
 from dataclasses import dataclass
 
 from common import (
@@ -46,6 +47,11 @@ FRAME_CONNECT = 0x02
 FRAME_CONNECT_OK = 0x03
 FRAME_CONNECT_FAIL = 0x04
 FRAME_CLOSE = 0x05
+FRAME_KEEPALIVE = 0x06
+FRAME_KEEPALIVE_ACK = 0x07
+
+# Backpressure limits
+MAX_CHANNEL_BUFFER = 1 * 1024 * 1024  # 1 MB per channel
 
 def make_frame(frame_type: int, channel_id: int, payload: bytes = b'') -> bytes:
     """Create a binary frame: type(1) + channel(2) + length(2) + payload"""
@@ -73,6 +79,8 @@ class Channel:
     reader: Optional[asyncio.StreamReader] = None
     writer: Optional[asyncio.StreamWriter] = None
     connected: bool = False
+    pending_bytes: int = 0  # Bytes queued for sending to destination
+    drain_event: Optional[asyncio.Event] = None  # Set when buffer drains below limit
 
 
 # ============================================================================
@@ -97,6 +105,13 @@ class TunnelSession:
         self.binary_mode = False
         self.channels: Dict[int, Channel] = {}
         self.write_lock = asyncio.Lock()
+
+        # Keepalive
+        self.last_recv_time: float = time.time()
+        self.keepalive_task: Optional[asyncio.Task] = None
+
+        # Channel reader tasks (for cleanup on close)
+        self.channel_reader_tasks: Dict[int, asyncio.Task] = {}
 
         # User info (set after authentication)
         self.username: Optional[str] = None
@@ -127,6 +142,9 @@ class TunnelSession:
 
             self._log(logging.INFO, f"Authenticated, entering binary mode: {self.peer_str}")
 
+            # Start keepalive sender
+            self.keepalive_task = asyncio.create_task(self._keepalive_loop())
+
             # Phase 2: Binary streaming mode
             await self._binary_mode()
 
@@ -135,6 +153,12 @@ class TunnelSession:
         except Exception as e:
             self._log(logging.ERROR, f"Session error: {e}")
         finally:
+            if self.keepalive_task:
+                self.keepalive_task.cancel()
+                try:
+                    await self.keepalive_task
+                except asyncio.CancelledError:
+                    pass
             await self._cleanup()
             self._log(logging.INFO, f"Session ended: {self.peer_str}")
 
@@ -262,9 +286,14 @@ class TunnelSession:
                 if not chunk:
                     self._log(logging.DEBUG, "Connection closed by client")
                     break
+                self.last_recv_time = time.time()
                 buffer += chunk
             except asyncio.TimeoutError:
-                # Check if connection is still alive
+                # Check keepalive timeout
+                elapsed = time.time() - self.last_recv_time
+                if elapsed > self.config.keepalive_timeout:
+                    self._log(logging.WARNING, f"Keepalive timeout ({elapsed:.0f}s), closing")
+                    break
                 if self.writer.is_closing():
                     break
                 continue
@@ -297,10 +326,18 @@ class TunnelSession:
             await self._handle_data(channel_id, payload)
         elif frame_type == FRAME_CLOSE:
             await self._handle_close(channel_id)
+        elif frame_type == FRAME_KEEPALIVE:
+            await self._send_frame(FRAME_KEEPALIVE_ACK, 0)
 
     async def _handle_connect(self, channel_id: int, payload: bytes):
         """Handle CONNECT request."""
         try:
+            # Check channel limit
+            if len(self.channels) >= self.config.max_channels:
+                self._log(logging.WARNING, f"Channel limit reached ({self.config.max_channels})")
+                await self._send_frame(FRAME_CONNECT_FAIL, channel_id, b"channel limit reached")
+                return
+
             # Parse: host_len(1) + host + port(2)
             host_len = payload[0]
             host = payload[1:1+host_len].decode('utf-8')
@@ -324,12 +361,15 @@ class TunnelSession:
                     port=port,
                     reader=reader,
                     writer=writer,
-                    connected=True
+                    connected=True,
+                    drain_event=asyncio.Event()
                 )
+                channel.drain_event.set()  # Initially not backpressured
                 self.channels[channel_id] = channel
 
-                # Start reading from destination
-                asyncio.create_task(self._channel_reader(channel))
+                # Start reading from destination (tracked for cleanup)
+                task = asyncio.create_task(self._channel_reader(channel))
+                self.channel_reader_tasks[channel_id] = task
 
                 # Send success
                 await self._send_frame(FRAME_CONNECT_OK, channel_id)
@@ -360,20 +400,31 @@ class TunnelSession:
             await self._close_channel(channel)
 
     async def _channel_reader(self, channel: Channel):
-        """Read from destination and send to client."""
+        """Read from destination and send to client with backpressure."""
         try:
             while channel.connected:
-                data = await asyncio.wait_for(
-                    channel.reader.read(32768),
-                    timeout=300.0
-                )
+                # Backpressure: wait if tunnel write buffer is full
+                if channel.pending_bytes >= MAX_CHANNEL_BUFFER:
+                    channel.drain_event.clear()
+                    await channel.drain_event.wait()
+                    if not channel.connected:
+                        break
+
+                try:
+                    data = await asyncio.wait_for(
+                        channel.reader.read(32768),
+                        timeout=300.0
+                    )
+                except asyncio.TimeoutError:
+                    continue
+
                 if not data:
                     break
 
+                channel.pending_bytes += len(data)
                 await self._send_frame(FRAME_DATA, channel.channel_id, data)
+                channel.pending_bytes -= len(data)
 
-        except asyncio.TimeoutError:
-            pass
         except Exception as e:
             logger.debug(f"Channel reader error: {e}")
         finally:
@@ -394,11 +445,16 @@ class TunnelSession:
             pass
 
     async def _close_channel(self, channel: Channel):
-        """Close a channel."""
+        """Close a channel and its resources."""
         if not channel.connected:
             return
         channel.connected = False
 
+        # Wake up any backpressured reader
+        if channel.drain_event:
+            channel.drain_event.set()
+
+        # Close writer
         if channel.writer:
             try:
                 channel.writer.close()
@@ -406,16 +462,47 @@ class TunnelSession:
             except:
                 pass
 
+        # Close reader
+        if channel.reader:
+            try:
+                channel.reader.feed_eof()
+            except:
+                pass
+
+        # Cancel and remove reader task
+        task = self.channel_reader_tasks.pop(channel.channel_id, None)
+        if task and not task.done():
+            task.cancel()
+
         self.channels.pop(channel.channel_id, None)
 
     async def _cleanup(self):
         """Cleanup session."""
+        # Cancel all channel reader tasks first
+        for task in self.channel_reader_tasks.values():
+            if not task.done():
+                task.cancel()
+        if self.channel_reader_tasks:
+            await asyncio.gather(*self.channel_reader_tasks.values(), return_exceptions=True)
+        self.channel_reader_tasks.clear()
+
         for channel in list(self.channels.values()):
             await self._close_channel(channel)
         try:
             self.writer.close()
             await self.writer.wait_closed()
         except:
+            pass
+
+    async def _keepalive_loop(self):
+        """Periodically send keepalive probes."""
+        try:
+            while True:
+                await asyncio.sleep(self.config.keepalive_interval)
+                if self.writer.is_closing():
+                    break
+                await self._send_frame(FRAME_KEEPALIVE, 0)
+        except asyncio.CancelledError:
             pass
 
 
@@ -449,6 +536,8 @@ class TunnelServer:
         logger.info(f"SMTP Tunnel Server on {addr[0]}:{addr[1]}")
         logger.info(f"Hostname: {self.config.hostname}")
         logger.info(f"Users loaded: {len(self.users)}")
+        logger.info(f"Max channels: {self.config.max_channels}")
+        logger.info(f"Keepalive: {self.config.keepalive_interval}s interval, {self.config.keepalive_timeout}s timeout")
 
         async with server:
             await server.serve_forever()
@@ -479,6 +568,9 @@ def main():
         key_file=server_conf.get('key_file', 'server.key'),
         users_file=server_conf.get('users_file', 'users.yaml'),
         log_users=server_conf.get('log_users', True),
+        max_channels=server_conf.get('max_channels', 256),
+        keepalive_interval=server_conf.get('keepalive_interval', 30),
+        keepalive_timeout=server_conf.get('keepalive_timeout', 90),
     )
 
     # Load users file (command line override or from config)

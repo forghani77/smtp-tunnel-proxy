@@ -23,8 +23,8 @@ import struct
 import time
 import os
 import socket
-from typing import Dict, Optional, Tuple
-from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Set
+from dataclasses import dataclass, field
 
 from common import TunnelCrypto, load_config, ClientConfig
 
@@ -44,7 +44,12 @@ FRAME_CONNECT = 0x02
 FRAME_CONNECT_OK = 0x03
 FRAME_CONNECT_FAIL = 0x04
 FRAME_CLOSE = 0x05
+FRAME_KEEPALIVE = 0x06
+FRAME_KEEPALIVE_ACK = 0x07
 FRAME_HEADER_SIZE = 5
+
+# Backpressure limits
+MAX_CHANNEL_BUFFER = 1 * 1024 * 1024  # 1 MB per channel
 
 def make_frame(frame_type: int, channel_id: int, payload: bytes = b'') -> bytes:
     return struct.pack('>BHH', frame_type, channel_id, len(payload)) + payload
@@ -62,6 +67,8 @@ class Channel:
     host: str
     port: int
     connected: bool = False
+    pending_bytes: int = 0  # Bytes queued for sending to tunnel
+    drain_event: Optional[asyncio.Event] = None  # Set when buffer drains below limit
 
 
 # ============================================================================
@@ -86,6 +93,15 @@ class TunnelClient:
 
         self.write_lock = asyncio.Lock()
 
+        # Keepalive
+        self.last_recv_time: float = time.time()
+        self.keepalive_task: Optional[asyncio.Task] = None
+
+        # Channel migration: track active channel info for reconnect
+        # {channel_id: (host, port, local_reader, local_writer)}
+        self.active_channel_info: Dict[int, Tuple[str, int, asyncio.StreamReader, asyncio.StreamWriter]] = {}
+        self.migration_lock = asyncio.Lock()
+
     async def connect(self) -> bool:
         """Connect and do SMTP handshake, then switch to binary mode."""
         try:
@@ -105,6 +121,8 @@ class TunnelClient:
                 return False
 
             self.connected = True
+            self.last_recv_time = time.time()
+            self.keepalive_task = asyncio.create_task(self._keepalive_loop())
             logger.info("Connected - binary mode active")
             return True
 
@@ -219,9 +237,10 @@ class TunnelClient:
 
         while self.connected:
             try:
-                chunk = await asyncio.wait_for(self.reader.read(65536), timeout=300.0)
+                chunk = await asyncio.wait_for(self.reader.read(65536), timeout=60.0)
                 if not chunk:
                     break
+                self.last_recv_time = time.time()
                 buffer += chunk
 
                 # Process frames
@@ -238,6 +257,11 @@ class TunnelClient:
                     await self._handle_frame(frame_type, channel_id, payload)
 
             except asyncio.TimeoutError:
+                # Check keepalive timeout
+                elapsed = time.time() - self.last_recv_time
+                if elapsed > self.config.keepalive_timeout:
+                    logger.warning(f"Keepalive timeout ({elapsed:.0f}s), reconnecting")
+                    break
                 continue
             except Exception as e:
                 logger.error(f"Receiver error: {e}")
@@ -271,6 +295,9 @@ class TunnelClient:
             if channel:
                 await self._close_channel(channel)
 
+        elif frame_type == FRAME_KEEPALIVE:
+            await self.send_frame(FRAME_KEEPALIVE_ACK, 0)
+
     async def send_frame(self, frame_type: int, channel_id: int, payload: bytes = b''):
         """Send frame to server."""
         if not self.connected or not self.writer:
@@ -286,6 +313,11 @@ class TunnelClient:
     async def open_channel(self, host: str, port: int) -> Tuple[int, bool]:
         """Open a tunnel channel."""
         if not self.connected:
+            return 0, False
+
+        # Check channel limit
+        if len(self.channels) >= self.config.max_channels:
+            logger.warning(f"Channel limit reached ({self.config.max_channels})")
             return 0, False
 
         async with self.channel_lock:
@@ -324,22 +356,44 @@ class TunnelClient:
         await self.send_frame(FRAME_CLOSE, channel_id)
 
     async def _close_channel(self, channel: Channel):
-        """Close local channel."""
+        """Close local channel and cleanup."""
         if not channel.connected:
             return
         channel.connected = False
 
+        # Wake up any backpressured forward loop
+        if channel.drain_event:
+            channel.drain_event.set()
+
+        # Close writer
         try:
             channel.writer.close()
             await channel.writer.wait_closed()
         except:
             pass
 
+        # Close reader
+        try:
+            channel.reader.feed_eof()
+        except:
+            pass
+
+        # Remove from active channel info
+        self.active_channel_info.pop(channel.channel_id, None)
         self.channels.pop(channel.channel_id, None)
 
     async def disconnect(self):
         """Disconnect and cleanup."""
         self.connected = False
+
+        # Cancel keepalive
+        if self.keepalive_task:
+            self.keepalive_task.cancel()
+            try:
+                await self.keepalive_task
+            except asyncio.CancelledError:
+                pass
+
         for channel in list(self.channels.values()):
             await self._close_channel(channel)
         if self.writer:
@@ -353,6 +407,88 @@ class TunnelClient:
         self.channels.clear()
         self.connect_events.clear()
         self.connect_results.clear()
+
+    async def _keepalive_loop(self):
+        """Periodically send keepalive probes."""
+        try:
+            while True:
+                await asyncio.sleep(self.config.keepalive_interval)
+                if not self.connected:
+                    break
+                await self.send_frame(FRAME_KEEPALIVE, 0)
+        except asyncio.CancelledError:
+            pass
+
+    async def migrate_channels(self):
+        """Re-establish active channels after reconnect."""
+        async with self.migration_lock:
+            if not self.active_channel_info:
+                return
+
+            logger.info(f"Migrating {len(self.active_channel_info)} channels...")
+            to_migrate = dict(self.active_channel_info)
+            self.active_channel_info.clear()
+
+            for old_id, (host, port, local_reader, local_writer) in to_migrate.items():
+                try:
+                    new_id, success = await self.open_channel(host, port)
+                    if success:
+                        # Create new channel with the local connection
+                        channel = Channel(
+                            channel_id=new_id,
+                            reader=local_reader,
+                            writer=local_writer,
+                            host=host,
+                            port=port,
+                            connected=True,
+                            drain_event=asyncio.Event()
+                        )
+                        channel.drain_event.set()
+                        self.channels[new_id] = channel
+                        self.active_channel_info[new_id] = (host, port, local_reader, local_writer)
+                        asyncio.create_task(self._migrated_forward_loop(channel))
+                        logger.info(f"Migrated channel {old_id} -> {new_id} ({host}:{port})")
+                    else:
+                        # Failed to re-establish, close local connection
+                        logger.warning(f"Failed to migrate channel {old_id} ({host}:{port})")
+                        local_writer.close()
+                except Exception as e:
+                    logger.error(f"Migration error for channel {old_id}: {e}")
+                    try:
+                        local_writer.close()
+                    except:
+                        pass
+
+    async def _migrated_forward_loop(self, channel: Channel):
+        """Forward loop for migrated channels."""
+        try:
+            while channel.connected and self.connected:
+                try:
+                    data = await asyncio.wait_for(channel.reader.read(32768), timeout=0.1)
+                    if data:
+                        # Backpressure: wait if tunnel buffer is full
+                        if channel.pending_bytes >= MAX_CHANNEL_BUFFER:
+                            channel.drain_event.clear()
+                            await channel.drain_event.wait()
+                            if not channel.connected:
+                                break
+
+                        channel.pending_bytes += len(data)
+                        await self.send_data(channel.channel_id, data)
+                        channel.pending_bytes -= len(data)
+
+                        # Signal drain if we were backpressured
+                        if channel.pending_bytes < MAX_CHANNEL_BUFFER // 2 and channel.drain_event:
+                            channel.drain_event.set()
+                    elif data == b'':
+                        break
+                except asyncio.TimeoutError:
+                    continue
+        except:
+            pass
+        finally:
+            await self.close_channel_remote(channel.channel_id)
+            await self._close_channel(channel)
 
 
 # ============================================================================
@@ -390,9 +526,14 @@ class PortForward:
                     writer=writer,
                     host=self.forward_host,
                     port=self.forward_port,
-                    connected=True
+                    connected=True,
+                    drain_event=asyncio.Event()
                 )
+                channel.drain_event.set()
                 self.tunnel.channels[channel_id] = channel
+                self.tunnel.active_channel_info[channel_id] = (
+                    self.forward_host, self.forward_port, reader, writer
+                )
                 await self._forward_loop(channel)
             else:
                 writer.close()
@@ -410,13 +551,26 @@ class PortForward:
                 pass
 
     async def _forward_loop(self, channel: Channel):
-        """Forward data from local client to tunnel."""
+        """Forward data from local client to tunnel with backpressure."""
         try:
             while channel.connected and self.tunnel.connected:
                 try:
                     data = await asyncio.wait_for(channel.reader.read(32768), timeout=0.1)
                     if data:
+                        # Backpressure: wait if tunnel buffer is full
+                        if channel.pending_bytes >= MAX_CHANNEL_BUFFER:
+                            channel.drain_event.clear()
+                            await channel.drain_event.wait()
+                            if not channel.connected:
+                                break
+
+                        channel.pending_bytes += len(data)
                         await self.tunnel.send_data(channel.channel_id, data)
+                        channel.pending_bytes -= len(data)
+
+                        # Signal drain if we were backpressured
+                        if channel.pending_bytes < MAX_CHANNEL_BUFFER // 2 and channel.drain_event:
+                            channel.drain_event.set()
                     elif data == b'':
                         break
                 except asyncio.TimeoutError:
@@ -503,9 +657,12 @@ class SOCKS5Server:
                     writer=writer,
                     host=host,
                     port=port,
-                    connected=True
+                    connected=True,
+                    drain_event=asyncio.Event()
                 )
+                channel.drain_event.set()
                 self.tunnel.channels[channel_id] = channel
+                self.tunnel.active_channel_info[channel_id] = (host, port, reader, writer)
                 await self._forward_loop(channel)
             else:
                 writer.write(bytes([SOCKS5.VERSION, SOCKS5.REP_FAILURE, 0, 1, 0, 0, 0, 0, 0, 0]))
@@ -524,12 +681,26 @@ class SOCKS5Server:
                 pass
 
     async def _forward_loop(self, channel: Channel):
+        """Forward data from local client to tunnel with backpressure."""
         try:
             while channel.connected and self.tunnel.connected:
                 try:
                     data = await asyncio.wait_for(channel.reader.read(32768), timeout=0.1)
                     if data:
+                        # Backpressure: wait if tunnel buffer is full
+                        if channel.pending_bytes >= MAX_CHANNEL_BUFFER:
+                            channel.drain_event.clear()
+                            await channel.drain_event.wait()
+                            if not channel.connected:
+                                break
+
+                        channel.pending_bytes += len(data)
                         await self.tunnel.send_data(channel.channel_id, data)
+                        channel.pending_bytes -= len(data)
+
+                        # Signal drain if we were backpressured
+                        if channel.pending_bytes < MAX_CHANNEL_BUFFER // 2 and channel.drain_event:
+                            channel.drain_event.set()
                     elif data == b'':
                         break
                 except asyncio.TimeoutError:
@@ -543,71 +714,78 @@ class SOCKS5Server:
 # ============================================================================
 
 async def run_client(config: ClientConfig, ca_cert: str):
-    """Run client with auto-reconnect."""
+    """Run client with auto-reconnect and channel migration."""
     reconnect_delay = 2
     max_reconnect_delay = 30
     current_delay = reconnect_delay
 
-    while True:
-        tunnel = TunnelClient(config, ca_cert)
+    # Persistent listen server - survives tunnel reconnects
+    tunnel = TunnelClient(config, ca_cert)
+    handler = None
+    srv = None
 
-        if not await tunnel.connect():
-            logger.warning(f"Connection failed, retrying in {current_delay}s...")
-            await asyncio.sleep(current_delay)
-            current_delay = min(current_delay * 2, max_reconnect_delay)
-            continue
+    if config.mode == 'socks':
+        handler = SOCKS5Server(tunnel, config.listen_host, config.listen_port)
+    else:
+        handler = PortForward(tunnel, config.listen_host, config.listen_port,
+                              config.forward_host, config.forward_port)
 
-        current_delay = reconnect_delay
-        receiver_task = asyncio.create_task(tunnel._receiver_loop())
+    # Start persistent listen server
+    srv = await asyncio.start_server(
+        handler.handle_client, handler.listen_host if handler else config.listen_host,
+        handler.listen_port if handler else config.listen_port,
+        reuse_address=True
+    )
+    addr = srv.sockets[0].getsockname()
+    if config.mode == 'socks':
+        logger.info(f"SOCKS5 proxy on {addr[0]}:{addr[1]}")
+    else:
+        logger.info(f"Listening on {addr[0]}:{addr[1]} -> {config.forward_host}:{config.forward_port}")
 
-        try:
-            if config.mode == 'socks':
-                handler = SOCKS5Server(tunnel, config.listen_host, config.listen_port)
-                srv = await asyncio.start_server(
-                    handler.handle_client, handler.host, handler.port,
-                    reuse_address=True
-                )
-                addr = srv.sockets[0].getsockname()
-                logger.info(f"SOCKS5 proxy on {addr[0]}:{addr[1]}")
-            else:
-                handler = PortForward(tunnel, config.listen_host, config.listen_port,
-                                      config.forward_host, config.forward_port)
-                srv = await asyncio.start_server(
-                    handler.handle_client, handler.listen_host, handler.listen_port,
-                    reuse_address=True
-                )
-                addr = srv.sockets[0].getsockname()
-                logger.info(f"Listening on {addr[0]}:{addr[1]} -> {handler.forward_host}:{handler.forward_port}")
+    async with srv:
+        while True:
+            tunnel = TunnelClient(config, ca_cert)
+            # Re-point handler to new tunnel instance
+            if isinstance(handler, SOCKS5Server):
+                handler.tunnel = tunnel
+            elif isinstance(handler, PortForward):
+                handler.tunnel = tunnel
 
-            async with srv:
+            if not await tunnel.connect():
+                logger.warning(f"Connection failed, retrying in {current_delay}s...")
+                await asyncio.sleep(current_delay)
+                current_delay = min(current_delay * 2, max_reconnect_delay)
+                continue
+
+            current_delay = reconnect_delay
+            receiver_task = asyncio.create_task(tunnel._receiver_loop())
+
+            try:
+                logger.info("Tunnel connected")
+                await receiver_task
+
+            except asyncio.CancelledError:
+                pass
+            except KeyboardInterrupt:
+                logger.info("Shutting down...")
+                await tunnel.disconnect()
+                return 0
+            except OSError as e:
+                if "Address already in use" in str(e):
+                    logger.error(f"Port {config.listen_port} already in use, waiting...")
+                    await asyncio.sleep(2)
+                else:
+                    logger.error(f"Server error: {e}")
+            finally:
+                await tunnel.disconnect()
+                receiver_task.cancel()
                 try:
                     await receiver_task
                 except asyncio.CancelledError:
                     pass
 
-            if tunnel.connected:
-                tunnel.connected = False
-
             logger.warning("Connection lost, reconnecting...")
             current_delay = reconnect_delay
-
-        except KeyboardInterrupt:
-            logger.info("Shutting down...")
-            await tunnel.disconnect()
-            return 0
-        except OSError as e:
-            if "Address already in use" in str(e):
-                logger.error(f"Port {config.listen_port} already in use, waiting...")
-                await asyncio.sleep(2)
-            else:
-                logger.error(f"Server error: {e}")
-        finally:
-            await tunnel.disconnect()
-            receiver_task.cancel()
-            try:
-                await receiver_task
-            except asyncio.CancelledError:
-                pass
 
 
 def main():
@@ -659,6 +837,9 @@ def main():
         forward_port=args.forward_port or client_conf.get('forward_port', 0),
         username=args.username or client_conf.get('username', ''),
         secret=args.secret or client_conf.get('secret', ''),
+        max_channels=client_conf.get('max_channels', 256),
+        keepalive_interval=client_conf.get('keepalive_interval', 30),
+        keepalive_timeout=client_conf.get('keepalive_timeout', 90),
     )
 
     ca_cert = args.ca_cert or client_conf.get('ca_cert')
