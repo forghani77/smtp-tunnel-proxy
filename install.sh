@@ -294,6 +294,9 @@ server:
   key_file: "$CONFIG_DIR/server.key"
   users_file: "$CONFIG_DIR/users.yaml"
   log_users: true
+  max_channels: 256
+  keepalive_interval: 30
+  keepalive_timeout: 90
 
 client:
   server_host: "$DOMAIN_NAME"
@@ -304,6 +307,9 @@ client:
   forward_host: "127.0.0.1"
   forward_port: 2090
   ca_cert: "ca.crt"
+  max_channels: 256
+  keepalive_interval: 30
+  keepalive_timeout: 90
 EOF
 
     chmod 600 "$CONFIG_DIR/config.yaml"
@@ -485,7 +491,7 @@ main() {
     echo ""
     echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}  SMTP Tunnel Proxy Installer${NC}"
-    echo -e "${GREEN}  Version 1.2.0${NC}"
+    echo -e "${GREEN}  Version 1.5.0${NC}"
     echo -e "${GREEN}========================================${NC}"
     echo ""
 
