@@ -528,14 +528,22 @@ class PortForward:
         except Exception as e:
             logger.debug(f"Forward error: {e}")
         finally:
-            if channel:
-                await self.tunnel.close_channel_remote(channel.channel_id)
-                await self.tunnel._close_channel(channel)
+            # Close local socket first (don't wait for dead tunnel)
             try:
                 writer.close()
                 await writer.wait_closed()
             except:
                 pass
+            if channel:
+                # Best-effort notify server (may fail if tunnel is dead)
+                try:
+                    await asyncio.wait_for(
+                        self.tunnel.close_channel_remote(channel.channel_id),
+                        timeout=2.0
+                    )
+                except:
+                    pass
+                await self.tunnel._close_channel(channel)
 
     async def _forward_loop(self, channel: Channel):
         """Forward data from local client to tunnel."""
@@ -643,14 +651,21 @@ class SOCKS5Server:
         except Exception as e:
             logger.debug(f"SOCKS error: {e}")
         finally:
-            if channel:
-                await self.tunnel.close_channel_remote(channel.channel_id)
-                await self.tunnel._close_channel(channel)
+            # Close local socket first (don't wait for dead tunnel)
             try:
                 writer.close()
                 await writer.wait_closed()
             except:
                 pass
+            if channel:
+                try:
+                    await asyncio.wait_for(
+                        self.tunnel.close_channel_remote(channel.channel_id),
+                        timeout=2.0
+                    )
+                except:
+                    pass
+                await self.tunnel._close_channel(channel)
 
     async def _forward_loop(self, channel: Channel):
         """Forward data from local client to tunnel."""
