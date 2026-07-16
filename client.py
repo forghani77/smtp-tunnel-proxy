@@ -112,8 +112,8 @@ class TunnelClient:
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 # Detect dead tunnel fast (default Linux is 2+ hours)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10)
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 120)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 30)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
 
             # SMTP Handshake
