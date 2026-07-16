@@ -579,8 +579,8 @@ class SOCKS5:
 class SOCKS5Server:
     def __init__(self, tunnel: TunnelClient, host: str = '127.0.0.1', port: int = 1080):
         self.tunnel = tunnel
-        self.host = host
-        self.port = port
+        self.listen_host = host
+        self.listen_port = port
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         channel = None
