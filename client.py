@@ -48,9 +48,6 @@ FRAME_KEEPALIVE = 0x06
 FRAME_KEEPALIVE_ACK = 0x07
 FRAME_HEADER_SIZE = 5
 
-# Backpressure limits
-MAX_CHANNEL_BUFFER = 1 * 1024 * 1024  # 1 MB per channel
-
 def make_frame(frame_type: int, channel_id: int, payload: bytes = b'') -> bytes:
     return struct.pack('>BHH', frame_type, channel_id, len(payload)) + payload
 
@@ -67,8 +64,6 @@ class Channel:
     host: str
     port: int
     connected: bool = False
-    pending_bytes: int = 0  # Bytes queued for sending to tunnel
-    drain_event: Optional[asyncio.Event] = None  # Set when buffer drains below limit
 
 
 # ============================================================================
@@ -229,7 +224,7 @@ class TunnelClient:
 
     async def _receiver_loop(self):
         """Receive and dispatch frames from server."""
-        buffer = b''
+        buffer = bytearray()
 
         while self.connected:
             try:
@@ -237,18 +232,18 @@ class TunnelClient:
                 if not chunk:
                     break
                 self.last_recv_time = time.time()
-                buffer += chunk
+                buffer.extend(chunk)
 
                 # Process frames
                 while len(buffer) >= FRAME_HEADER_SIZE:
-                    frame_type, channel_id, payload_len = struct.unpack('>BHH', buffer[:5])
+                    frame_type, channel_id, payload_len = struct.unpack('>BHH', bytes(buffer[:5]))
                     total_len = FRAME_HEADER_SIZE + payload_len
 
                     if len(buffer) < total_len:
                         break
 
-                    payload = buffer[FRAME_HEADER_SIZE:total_len]
-                    buffer = buffer[total_len:]
+                    payload = bytes(buffer[FRAME_HEADER_SIZE:total_len])
+                    del buffer[:total_len]
 
                     await self._handle_frame(frame_type, channel_id, payload)
 
@@ -359,10 +354,6 @@ class TunnelClient:
             return
         channel.connected = False
 
-        # Wake up any backpressured forward loop
-        if channel.drain_event:
-            channel.drain_event.set()
-
         # Close writer
         try:
             channel.writer.close()
@@ -439,9 +430,7 @@ class TunnelClient:
                             host=host,
                             port=port,
                             connected=True,
-                            drain_event=asyncio.Event()
                         )
-                        channel.drain_event.set()
                         self.channels[new_id] = channel
                         self.active_channel_info[new_id] = (host, port, local_reader, local_writer)
                         asyncio.create_task(self._migrated_forward_loop(channel))
@@ -464,20 +453,7 @@ class TunnelClient:
                 try:
                     data = await asyncio.wait_for(channel.reader.read(32768), timeout=0.1)
                     if data:
-                        # Backpressure: wait if tunnel buffer is full
-                        if channel.pending_bytes >= MAX_CHANNEL_BUFFER:
-                            channel.drain_event.clear()
-                            await channel.drain_event.wait()
-                            if not channel.connected:
-                                break
-
-                        channel.pending_bytes += len(data)
                         await self.send_data(channel.channel_id, data)
-                        channel.pending_bytes -= len(data)
-
-                        # Signal drain if we were backpressured
-                        if channel.pending_bytes < MAX_CHANNEL_BUFFER // 2 and channel.drain_event:
-                            channel.drain_event.set()
                     elif data == b'':
                         break
                 except asyncio.TimeoutError:
@@ -525,9 +501,7 @@ class PortForward:
                     host=self.forward_host,
                     port=self.forward_port,
                     connected=True,
-                    drain_event=asyncio.Event()
                 )
-                channel.drain_event.set()
                 self.tunnel.channels[channel_id] = channel
                 self.tunnel.active_channel_info[channel_id] = (
                     self.forward_host, self.forward_port, reader, writer
@@ -549,26 +523,13 @@ class PortForward:
                 pass
 
     async def _forward_loop(self, channel: Channel):
-        """Forward data from local client to tunnel with backpressure."""
+        """Forward data from local client to tunnel."""
         try:
             while channel.connected and self.tunnel.connected:
                 try:
                     data = await asyncio.wait_for(channel.reader.read(32768), timeout=0.1)
                     if data:
-                        # Backpressure: wait if tunnel buffer is full
-                        if channel.pending_bytes >= MAX_CHANNEL_BUFFER:
-                            channel.drain_event.clear()
-                            await channel.drain_event.wait()
-                            if not channel.connected:
-                                break
-
-                        channel.pending_bytes += len(data)
                         await self.tunnel.send_data(channel.channel_id, data)
-                        channel.pending_bytes -= len(data)
-
-                        # Signal drain if we were backpressured
-                        if channel.pending_bytes < MAX_CHANNEL_BUFFER // 2 and channel.drain_event:
-                            channel.drain_event.set()
                     elif data == b'':
                         break
                 except asyncio.TimeoutError:
@@ -656,9 +617,7 @@ class SOCKS5Server:
                     host=host,
                     port=port,
                     connected=True,
-                    drain_event=asyncio.Event()
                 )
-                channel.drain_event.set()
                 self.tunnel.channels[channel_id] = channel
                 self.tunnel.active_channel_info[channel_id] = (host, port, reader, writer)
                 await self._forward_loop(channel)
@@ -679,26 +638,13 @@ class SOCKS5Server:
                 pass
 
     async def _forward_loop(self, channel: Channel):
-        """Forward data from local client to tunnel with backpressure."""
+        """Forward data from local client to tunnel."""
         try:
             while channel.connected and self.tunnel.connected:
                 try:
                     data = await asyncio.wait_for(channel.reader.read(32768), timeout=0.1)
                     if data:
-                        # Backpressure: wait if tunnel buffer is full
-                        if channel.pending_bytes >= MAX_CHANNEL_BUFFER:
-                            channel.drain_event.clear()
-                            await channel.drain_event.wait()
-                            if not channel.connected:
-                                break
-
-                        channel.pending_bytes += len(data)
                         await self.tunnel.send_data(channel.channel_id, data)
-                        channel.pending_bytes -= len(data)
-
-                        # Signal drain if we were backpressured
-                        if channel.pending_bytes < MAX_CHANNEL_BUFFER // 2 and channel.drain_event:
-                            channel.drain_event.set()
                     elif data == b'':
                         break
                 except asyncio.TimeoutError:

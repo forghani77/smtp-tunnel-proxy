@@ -50,9 +50,6 @@ FRAME_CLOSE = 0x05
 FRAME_KEEPALIVE = 0x06
 FRAME_KEEPALIVE_ACK = 0x07
 
-# Backpressure limits
-MAX_CHANNEL_BUFFER = 1 * 1024 * 1024  # 1 MB per channel
-
 def make_frame(frame_type: int, channel_id: int, payload: bytes = b'') -> bytes:
     """Create a binary frame: type(1) + channel(2) + length(2) + payload"""
     return struct.pack('>BHH', frame_type, channel_id, len(payload)) + payload
@@ -79,8 +76,6 @@ class Channel:
     reader: Optional[asyncio.StreamReader] = None
     writer: Optional[asyncio.StreamWriter] = None
     connected: bool = False
-    pending_bytes: int = 0  # Bytes queued for sending to destination
-    drain_event: Optional[asyncio.Event] = None  # Set when buffer drains below limit
 
 
 # ============================================================================
@@ -277,7 +272,7 @@ class TunnelSession:
 
     async def _binary_mode(self):
         """Handle binary streaming mode - this is FAST."""
-        buffer = b''
+        buffer = bytearray()
 
         while True:
             # Read data
@@ -287,7 +282,7 @@ class TunnelSession:
                     self._log(logging.DEBUG, "Connection closed by client")
                     break
                 self.last_recv_time = time.time()
-                buffer += chunk
+                buffer.extend(chunk)
             except asyncio.TimeoutError:
                 # Check keepalive timeout
                 elapsed = time.time() - self.last_recv_time
@@ -303,7 +298,7 @@ class TunnelSession:
 
             # Process complete frames
             while len(buffer) >= FRAME_HEADER_SIZE:
-                header = parse_frame_header(buffer)
+                header = parse_frame_header(bytes(buffer[:5]))
                 if not header:
                     break
 
@@ -313,8 +308,8 @@ class TunnelSession:
                 if len(buffer) < total_len:
                     break
 
-                payload = buffer[FRAME_HEADER_SIZE:total_len]
-                buffer = buffer[total_len:]
+                payload = bytes(buffer[FRAME_HEADER_SIZE:total_len])
+                del buffer[:total_len]
 
                 await self._handle_frame(frame_type, channel_id, payload)
 
@@ -362,9 +357,7 @@ class TunnelSession:
                     reader=reader,
                     writer=writer,
                     connected=True,
-                    drain_event=asyncio.Event()
                 )
-                channel.drain_event.set()  # Initially not backpressured
                 self.channels[channel_id] = channel
 
                 # Start reading from destination (tracked for cleanup)
@@ -400,16 +393,9 @@ class TunnelSession:
             await self._close_channel(channel)
 
     async def _channel_reader(self, channel: Channel):
-        """Read from destination and send to client with backpressure."""
+        """Read from destination and send to client."""
         try:
             while channel.connected:
-                # Backpressure: wait if tunnel write buffer is full
-                if channel.pending_bytes >= MAX_CHANNEL_BUFFER:
-                    channel.drain_event.clear()
-                    await channel.drain_event.wait()
-                    if not channel.connected:
-                        break
-
                 try:
                     data = await asyncio.wait_for(
                         channel.reader.read(32768),
@@ -421,9 +407,7 @@ class TunnelSession:
                 if not data:
                     break
 
-                channel.pending_bytes += len(data)
                 await self._send_frame(FRAME_DATA, channel.channel_id, data)
-                channel.pending_bytes -= len(data)
 
         except Exception as e:
             logger.debug(f"Channel reader error: {e}")
@@ -449,10 +433,6 @@ class TunnelSession:
         if not channel.connected:
             return
         channel.connected = False
-
-        # Wake up any backpressured reader
-        if channel.drain_event:
-            channel.drain_event.set()
 
         # Close writer
         if channel.writer:
