@@ -227,10 +227,6 @@ class TunnelClient:
                 continue
             return False
 
-    async def start_receiver(self):
-        """Start background task to receive frames from server."""
-        asyncio.create_task(self._receiver_loop())
-
     async def _receiver_loop(self):
         """Receive and dispatch frames from server."""
         buffer = b''
@@ -333,6 +329,8 @@ class TunnelClient:
             payload = make_connect_payload(host, port)
             await self.send_frame(FRAME_CONNECT, channel_id, payload)
         except Exception:
+            self.connect_events.pop(channel_id, None)
+            self.connect_results.pop(channel_id, None)
             return channel_id, False
 
         # Wait for response
@@ -744,7 +742,11 @@ async def run_client(config: ClientConfig, ca_cert: str):
 
     async with srv:
         while True:
+            # Preserve active channels from old tunnel for migration
+            old_active = tunnel.active_channel_info if tunnel else {}
             tunnel = TunnelClient(config, ca_cert)
+            tunnel.active_channel_info = old_active
+
             # Re-point handler to new tunnel instance
             if isinstance(handler, SOCKS5Server):
                 handler.tunnel = tunnel
@@ -758,6 +760,11 @@ async def run_client(config: ClientConfig, ca_cert: str):
                 continue
 
             current_delay = reconnect_delay
+
+            # Migrate channels from previous connection
+            if old_active:
+                await tunnel.migrate_channels()
+
             receiver_task = asyncio.create_task(tunnel._receiver_loop())
 
             try:
