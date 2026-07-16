@@ -31,8 +31,8 @@ server:
   max_channels: 256
 
   # Keepalive settings (detect dead connections)
-  keepalive_interval: 30   # Seconds between keepalive probes
-  keepalive_timeout: 90    # Seconds before declaring connection dead
+  keepalive_interval: 10   # Seconds between keepalive probes
+  keepalive_timeout: 30    # Seconds before declaring connection dead
 
 # ============================================================================
 # Client Configuration (for client.py)
@@ -65,8 +65,8 @@ client:
   max_channels: 256
 
   # Keepalive settings (detect dead connections)
-  keepalive_interval: 30   # Seconds between keepalive probes
-  keepalive_timeout: 90    # Seconds before declaring connection dead
+  keepalive_interval: 10   # Seconds between keepalive probes
+  keepalive_timeout: 30    # Seconds before declaring connection dead
 
 # ============================================================================
 # Stealth Configuration (DPI Evasion) - Optional
