@@ -689,9 +689,9 @@ class SOCKS5Server:
 
 async def run_client(config: ClientConfig, ca_cert: str):
     """Run client with auto-reconnect and channel migration."""
-    reconnect_delay = 2
-    max_reconnect_delay = 30
-    current_delay = reconnect_delay
+    reconnect_delays = [0, 0.5, 1, 2, 3, 5]  # instant for first 2, then backoff
+    max_reconnect_delay = 5
+    retry_count = 0
 
     # Persistent listen server - survives tunnel reconnects
     tunnel = TunnelClient(config, ca_cert)
@@ -730,12 +730,13 @@ async def run_client(config: ClientConfig, ca_cert: str):
                 handler.tunnel = tunnel
 
             if not await tunnel.connect():
-                logger.warning(f"Connection failed, retrying in {current_delay}s...")
-                await asyncio.sleep(current_delay)
-                current_delay = min(current_delay * 2, max_reconnect_delay)
+                delay = reconnect_delays[min(retry_count, len(reconnect_delays) - 1)]
+                logger.warning(f"Connection failed, retrying in {delay}s...")
+                await asyncio.sleep(delay)
+                retry_count += 1
                 continue
 
-            current_delay = reconnect_delay
+            retry_count = 0
 
             # Migrate channels from previous connection
             if old_active:
